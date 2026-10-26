@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ascii wallpaper</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #020b10; }
+      canvas {
+        display: block; width: 100vw; height: 100vh; cursor: crosshair;
+        font-family: "DejaVu Sans Mono", "Ubuntu Mono", ui-monospace, Menlo, monospace;
+      }
+    </style>
+    <link rel="stylesheet" href="core/chat.css" />
+  </head>
+  <body>
+    <canvas aria-hidden="true"></canvas>
+    <form id="chat" onsubmit="return false">
+      <textarea rows="2" placeholder="How can I help you today?" aria-label="Message"></textarea>
+      <div class="row">
+        <div class="pick" role="group" aria-label="Open in">
+          <button type="button" data-ai="claude">Claude</button>
+          <button type="button" data-ai="chatgpt">ChatGPT</button>
+        </div>
+        <button type="button" class="send" aria-label="Send">↑</button>
+      </div>
+    </form>
+    <!-- The scene itself (scenes/<name>.js, from ?scene=) is loaded by core/app.js. -->
+    <script src="core/math.js"></script>
+    <script src="core/grid.js"></script>
+    <script src="core/shapes.js"></script>
+    <script src="core/chat.js"></script>
+    <script src="core/app.js"></script>
+  </body>
+</html>
