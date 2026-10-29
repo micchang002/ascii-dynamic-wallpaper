@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ascii wallpaper screens</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #0c0c0e; color: #8a8a90; font: 12px ui-monospace, Menlo, monospace; }
+      iframe { position: absolute; border: 0; outline: 2px solid #2a2a30; background: #000; transform-origin: 0 0; }
+      .label { position: absolute; z-index: 1; padding: 2px 6px; color: #ddd; background: #000a; pointer-events: none; }
+      #help { position: fixed; left: 8px; bottom: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="help"></div>
+    <script src="layout.js"></script>
+    <script>
+      /**
+       * Several "monitors" in one tab, laid out as in the display settings, to try what
+       * wallpaper.py does across real ones (it only runs on Linux): each frame gets its own
+       * ?pxmm=, doors open where two touch, koi are handed through them and the count is kept
+       * across them, by dev/layout.js (wallpaper.py's Layout in JS). Each label shows the koi
+       * a monitor holds and its share. Serve the repo (the frames are called directly, so they
+       * must share an origin):
+       *
+       *   python3 -m http.server   →   http://localhost:8000/dev/screens.html
+       *
+       * ?layout=WxH+X+Y@PXMM,... (logical px, position, px per mm; leave out @PXMM for a monitor
+       * with no known size), ?scene=koi, and any other params are passed on to every frame.
+       * Each frame is drawn at its size in mm, as the monitors would stand on a desk (butted
+       * together at the middle of each shared edge); ?units=px shows the layout in px instead.
+       */
+      "use strict";
+
+      const params = new URLSearchParams(location.search);
+      const layout = params.get("layout") || "1920x1080+0+0@3.62,2560x1440+1920+300@4.29";
+
+      const screens = layout.split(",").map((spec, i) => {
+        // A typed "+" arrives as a space.
+        const m = /^(\d+)x(\d+)[+ ](-?\d+)[+ ](-?\d+)(?:@([\d.]+))?$/.exec(spec.trim());
+        if (!m) throw new Error(`bad layout entry "${spec}": use WxH+X+Y@PXMM`);
+        const [w, h, x, y] = m.slice(1, 5).map(Number);
+        const s = { i, x, y, w, h, pxmm: m[5] ? Number(m[5]) : 0 };
+        const call = (name, ...args) => {
+          const win = s.frame && s.frame.contentWindow;
+          if (win && win[name]) win[name](...args);
+        };
+        s.page = {
+          links: (doors, share) => {
+            call("wallpaperLinks", doors, share);
+            s.share = share;
+            label(s);
+          },
+          arrive: (...args) => call("wallpaperArrive", ...args),
+          populate: (n) => call("wallpaperPopulate", n),
+        };
+        return s;
+      });
+      const host = new ScreensLayout.Layout(screens);
+      setInterval(() => host.reconcile(), 1000);
+
+      window.addEventListener("message", (e) => {
+        const i = screens.findIndex((s) => s.frame.contentWindow === e.source);
+        if (i < 0 || !e.data) return;
+        if (e.data.handoff) host.handOff(i, e.data.handoff);
+        else host.hear(i, e.data);
+        if ("ready" in e.data) {
+          // A frame switching scenes (from its menu) shuts its doors until the new one is up.
+          e.source.addEventListener("pagehide", () => host.reset(i));
+        }
+        label(screens[i]);
+      });
+
+      function label(s) {
+        if (!s.label) return;
+        const size = s.pxmm ? `${s.pxmm} px/mm` : "size unknown";
+        const koi = s.count === null ? "" : ` · ${s.count} koi${s.share == null ? "" : ` (share ${s.share.toFixed(1)})`}`;
+        s.label.textContent = `${s.i}: ${s.w}×${s.h} ${size}${koi}`;
+      }
+
+      // Where each monitor stands, in mm (or px with ?units=px): the first as laid out, the rest
+      // butted against a placed neighbour, lined up at the middle of the edge they share.
+      const physical = params.get("units") !== "px";
+      const density = (s) => (physical ? s.pxmm || 3.78 : 1);
+      const placed = [screens[0]];
+      Object.assign(screens[0], { ux: screens[0].x / density(screens[0]), uy: screens[0].y / density(screens[0]) });
+      for (const a of placed) {
+        for (const d of host.doors[a.i]) {
+          const b = screens[d.j];
+          if (placed.includes(b)) continue;
+          const mid = (d.from + d.to) / 2, da = density(a), db = density(b);
+          if (d.side === "l" || d.side === "r") {
+            b.ux = d.side === "r" ? a.ux + a.w / da : a.ux - b.w / db;
+            b.uy = a.uy + mid / da - (a.y + mid - b.y) / db;
+          } else {
+            b.uy = d.side === "b" ? a.uy + a.h / da : a.uy - b.h / db;
+            b.ux = a.ux + mid / da - (a.x + mid - b.x) / db;
+          }
+          placed.push(b);
+        }
+      }
+      for (const s of screens) if (!placed.includes(s)) Object.assign(s, { ux: s.x / density(s), uy: s.y / density(s) });
+      const left = Math.min(...screens.map((s) => s.ux)), top = Math.min(...screens.map((s) => s.uy));
+      const right = Math.max(...screens.map((s) => s.ux + s.w / density(s)));
+      const bottom = Math.max(...screens.map((s) => s.uy + s.h / density(s)));
+      const query = new URLSearchParams(params);
+      query.delete("layout");
+      query.delete("units");
+      if (!query.has("scene")) query.set("scene", "koi");
+      if (!query.has("chat")) query.set("chat", "off");
+
+      for (const s of screens) {
+        const q = new URLSearchParams(query);
+        if (s.pxmm) q.set("pxmm", s.pxmm);
+        s.frame = document.createElement("iframe");
+        s.frame.src = `../index.html?${q}`;
+        Object.assign(s.frame.style, { width: `${s.w}px`, height: `${s.h}px` });
+        s.label = document.createElement("div");
+        s.label.className = "label";
+        document.body.append(s.frame, s.label);
+        label(s);
+      }
+
+      function fit() {
+        const k = Math.min(innerWidth / (right - left), (innerHeight - 24) / (bottom - top));
+        for (const s of screens) {
+          const at = { left: `${(s.ux - left) * k}px`, top: `${(s.uy - top) * k}px` };
+          Object.assign(s.frame.style, at, { transform: `scale(${k / density(s)})` });
+          Object.assign(s.label.style, at);
+        }
+      }
+      addEventListener("resize", fit);
+      fit();
+      document.getElementById("help").textContent =
+        `?layout=${layout} — ${physical ? "drawn to scale in mm" : "drawn in px"}, scaled to fit the tab`;
+    </script>
+  </body>
+</html>

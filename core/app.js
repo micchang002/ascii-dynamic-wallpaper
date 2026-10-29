@@ -5,17 +5,21 @@
  * A scene file registers itself with
  *
  *   Wallpaper.scene("name", (api) => ({
- *     cellWidth(W, H),         // optional: cell width in px (default ~W/190)
+ *     cellWidth(W, H),         // optional: cell width in px (default CELL_MM, else ~W/190)
  *     resize(),                // grid was resized; read grid.W/H/cw/ch/cols/rows
  *     paintBackdrop(ctx, W, H),// optional: the background behind the glyphs
  *     step(dt, t),             // optional: advance the simulation
  *     draw(t, dt),             // fill grid.glyph / grid.color for this frame
  *     pointerMove(x, y, moved),// optional
  *     click(x, y),             // optional
+ *     arrive(side, x, y, data),// optional: an animal swims in from the next monitor (below)
+ *     linkKey(),               // optional: the options that must match for doors to open
+ *     population: 7,           // optional: animals per monitor, when the host keeps count
+ *     populate(n),             // optional: bring in n more animals (n < 0: let -n go)
  *     chat: false,             // optional: this scene has no chat box
  *   }));
  *
- * where api = { grid, params, intParam, floatParam, pointer, stats, setTheme }. setTheme("light" |
+ * where api = { grid, params, intParam, floatParam, pointer, stats, setTheme, pxmm, links }. setTheme("light" |
  * "dark") tells the chat box which way to style itself; stats.data holds the latest system
  * readings (CPU, memory, GPU) when a host sends them.
  *
@@ -25,6 +29,23 @@
  * system readings through window.wallpaperStats(data) (see wallpaper.py's Stats). While
  * windows cover most of the screen it can slow the scene with window.wallpaperThrottle(fps),
  * or pause it with 0; wallpaperThrottle(null) gives back the full frame rate.
+ *
+ * Across monitors: ?pxmm= is how many CSS px make a millimetre on this monitor (wallpaper.py
+ * reads it from the monitor's EDID); with it, cells are CELL_MM wide everywhere, so glyphs and
+ * animals keep their size from one monitor to the next. Where this monitor's edge touches a
+ * neighbour running the same scene, the host opens a door with window.wallpaperLinks([{ side,
+ * from, to }]) (side "l" | "r" | "t" | "b", from..to along that edge in px); the scene reads them
+ * from links.doors. links.send(side, x, y, data) passes something leaving through a door to the
+ * neighbour, whose scene gets arrive(side it comes in by, x, y, data) in its own px; a door that
+ * shut on the way sends it back through the same side. Doors open only between scenes whose
+ * linkKey() matches (say ocean's view and species); a scene that changes those in place calls
+ * links.rekey().
+ *
+ * Keeping count: a scene with a population reports how many animals it holds with
+ * links.count(n). The host gives every monitor in a linked group a share of the group's total
+ * (by area), as links.share, and each door the neighbour's surplus (its count minus its share),
+ * so the scene can send animals from the fuller side; when the group's total is off, the host
+ * calls populate(±1) on the monitor furthest from its share. Without a host, links.share is null.
  */
 (() => {
   "use strict";
@@ -44,6 +65,29 @@
   const requested = params.get("scene") || "koi";
   const sceneName = /^[a-z0-9-]+$/.test(requested) ? requested : "koi";
   const chatLayer = params.get("chat") || "full";
+  const PXMM = Math.max(0, floatParam("pxmm", 0));
+  // About what ~W/190 gives on a 24" 1080p or 27" 1440p monitor.
+  const CELL_MM = 2.8;
+
+  /** A message to the host: wallpaper.py, or a page that holds this one in a frame (dev/screens.html). */
+  function post(message) {
+    const host = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.wallpaper;
+    if (host) host.postMessage(JSON.stringify(message));
+    else if (window.parent !== window) window.parent.postMessage(message, "*");
+  }
+
+  let reported = null, rekey = () => {};
+  const links = {
+    doors: [],
+    share: null,
+    send: (side, x, y, data) => post({ handoff: { side, x, y, data } }),
+    count: (n) => n !== reported && post({ count: (reported = n) }),
+    rekey: () => rekey(),
+  };
+  window.wallpaperLinks = (doors, share) => {
+    links.doors = Array.isArray(doors) ? doors : [];
+    links.share = Number.isFinite(share) ? share : null;
+  };
 
   const setTheme = (theme) => {
     document.documentElement.dataset.theme = theme;
@@ -66,7 +110,7 @@
     const grid = new Wallpaper.Grid(canvas);
     const pointer = { x: 0, y: 0, active: false, moved: 0 };
     const stats = { data: null };
-    const scene = factory({ grid, params, intParam, floatParam, pointer, stats, setTheme });
+    const scene = factory({ grid, params, intParam, floatParam, pointer, stats, setTheme, pxmm: PXMM, links });
     window.wallpaperStats = (data) => {
       stats.data = data;
     };
@@ -76,7 +120,8 @@
 
     function resize() {
       const W = window.innerWidth, H = window.innerHeight;
-      grid.resize(scene.cellWidth ? scene.cellWidth(W, H) : clamp(Math.round(W / 190), 7, 12));
+      const cell = PXMM ? clamp(Math.round(CELL_MM * PXMM), 5, 24) : clamp(Math.round(W / 190), 7, 12);
+      grid.resize(scene.cellWidth ? scene.cellWidth(W, H) : cell);
       if (scene.resize) scene.resize();
       grid.setBackdrop(scene.paintBackdrop ? (g, w, h) => scene.paintBackdrop(g, w, h) : null);
     }
@@ -154,8 +199,15 @@
     window.addEventListener("resize", resize);
     document.addEventListener("visibilitychange", schedule);
 
+    window.wallpaperArrive = (side, x, y, data) => scene.arrive && scene.arrive(side, x, y, data);
+    window.wallpaperPopulate = (n) => scene.populate && Number.isInteger(n) && scene.populate(n);
+    const linkKey = () => (scene.linkKey ? String(scene.linkKey()) : "");
+
     resize();
     schedule();
+    // Doors open only between scenes that take arrivals and look alike.
+    post({ ready: sceneName, links: !!scene.arrive, key: linkKey(), population: scene.population || 0 });
+    rekey = () => post({ key: linkKey() });
   }
 
   const script = document.createElement("script");

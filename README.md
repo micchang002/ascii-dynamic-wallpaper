@@ -49,6 +49,8 @@ The system monitor only works with the Linux launcher.
 ./wallpaper.py --scene microduck --ducks 6 # six robot ducks
 ./wallpaper.py --scene ocean --view side --species whale # whales seen through the water
 ./wallpaper.py --scene delta,koi    # one scene per monitor
+./wallpaper.py --size 1:597x336     # monitor 1's screen size in mm, if it reports a wrong one
+./wallpaper.py --no-link            # koi stay on their own monitor
 ./wallpaper.py --window             # preview in a normal window
 ./wallpaper.py --fps 15             # use less CPU (default 24)
 ./wallpaper.py --cycle 120          # play a whole day in 2 minutes
@@ -61,6 +63,14 @@ To try a scene in a browser, open `index.html?scene=delta`.
 ### Scene menu
 
 Click `≡` in the bottom-right corner to switch scenes (and options such as ocean's view and animals, or the cats' room). With `wallpaper.py`, each monitor remembers what you last picked and starts on it next time, unless you pass `--scene`. Add `?menu=0` to hide the button.
+
+### Multiple monitors
+
+`wallpaper.py` lays the monitors out as in your display settings, offsets included. Each monitor's size in mm comes from the monitor itself (EDID), so glyphs, koi and lily pads are the same physical size on all of them, even when their resolutions differ. Where two monitors running `koi` touch, koi swim from one to the other through the shared part of the edge; the rest of the edge stays a wall. Monitors only link when they run the same scene with the same options (for example ocean's view and animals).
+
+Linked monitors share one count: together they hold `--koi` per monitor, split by screen area, and each monitor stays within about one koi of its share. Koi leave only from the fuller side, and an over-full pond sends one koi at a time towards the door. When a monitor joins or leaves (say you switch it to another scene), the others make up the difference: a koi slowly rises from the deep, or sinks out of sight. If a monitor reports no size or a wrong one, `wallpaper.py` prints a hint and that monitor keeps the old screen-relative sizes until you give it one with `--size`.
+
+To try it without Linux, serve the repo (`python3 -m http.server`) and open `http://localhost:8000/dev/screens.html`. It shows several monitors in one tab, drawn to scale, each labelled with its koi and its share. Set them up with `?layout=1920x1080+0+0@3.62,2560x1440+1920+300@4.29` (size+x+y@px per mm, one per monitor).
 
 ## Good to know
 
@@ -92,4 +102,4 @@ Wallpaper.scene("name", ({ grid }) => ({
 | `shapes.js` | Shape helpers |
 | `menu.js` | The scene menu (bottom-right) |
 | `solid.js` | Small 3D bodies drawn as ASCII (z-buffer, rims, spine chains); used by ocean and tank |
-| `app.js` | The frame loop and mouse input |
+| `app.js` | The frame loop, mouse input, and the doors between monitors (`links`, `arrive`) |

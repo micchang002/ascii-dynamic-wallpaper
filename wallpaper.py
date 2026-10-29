@@ -17,6 +17,8 @@ prompt in Claude or ChatGPT in the default browser.
     ./wallpaper.py --scene delta,koi   # one scene per monitor, in order
     ./wallpaper.py --koi 9 --fps 30    # tune the pond
     ./wallpaper.py --monitor 1         # one monitor only
+    ./wallpaper.py --size 1:597x336    # monitor 1's screen in mm, if it reports none
+    ./wallpaper.py --no-link           # koi stay on their own monitor
     ./wallpaper.py --cycle 120         # preview a whole day in two minutes
     ./wallpaper.py --ai chatgpt        # chat box opens ChatGPT by default
     ./wallpaper.py --no-chat           # just the pond
@@ -25,11 +27,18 @@ prompt in Claude or ChatGPT in the default browser.
 
 The page's scene menu (bottom-right) switches scenes in place; each monitor
 remembers its pick (in settings.json) for next time unless --scene is given.
+
+Monitors are laid out as in the display settings. Each page learns its monitor's
+pixels per mm (from EDID, or --size), so glyphs and animals are the same size on
+every monitor; where two monitors running the same scene touch, koi swim across.
+Linked monitors share one count: the group keeps --koi per monitor in all, spread
+by area, and koi migrate (or rise and sink) to keep each monitor near its share.
 """
 import argparse
 import ctypes
 import ctypes.util
 import json
+import math
 import pathlib
 import shutil
 import signal
@@ -69,6 +78,13 @@ MENU_KEYS = {"scene", "view", "species", "env"}
 # A monitor this much covered by windows pauses its scene; this much slows it to SLOW_FPS.
 COVERED_PAUSE, COVERED_SLOW, SLOW_FPS = 0.95, 0.7, 5
 COVERAGE_MS = 500
+# Monitor edges this close (px) count as touching.
+EDGE_SLACK = 2
+OPPOSITE = {"l": "r", "r": "l", "t": "b", "b": "t"}
+# Pixels per mm outside this range is a made-up EDID size (projectors and some TVs send one).
+PXMM_RANGE = (1.2, 10)
+# How often linked monitors' animal counts are checked against their group's total.
+RECONCILE_MS = 1000
 
 
 class XPointer:
@@ -504,6 +520,38 @@ def run_js(view, script):
         view.run_javascript(script, None, None, None)
 
 
+def px_per_mm(monitor, size=None):
+    """The monitor's logical px per mm, from its EDID size or size=(w, h) mm; None if unknown."""
+    g = monitor.get_geometry()
+    w_mm, h_mm = size or (monitor.get_width_mm(), monitor.get_height_mm())
+    if w_mm <= 0 or h_mm <= 0:
+        return None
+    # Along the diagonal, so it doesn't matter whether a rotated monitor swaps its mm.
+    pxmm = math.hypot(g.width, g.height) / math.hypot(w_mm, h_mm)
+    return pxmm if PXMM_RANGE[0] <= pxmm <= PXMM_RANGE[1] else None
+
+
+def doors(rects):
+    """Where monitors (x, y, w, h) touch: for each, a list of (side, other, start, end), side
+    being l / r / t / b and start..end the shared stretch along that edge in its own px."""
+    found = [[] for _ in rects]
+    for i, (ax, ay, aw, ah) in enumerate(rects):
+        for j, (bx, by, bw, bh) in enumerate(rects):
+            if i == j:
+                continue
+            across = max(ay, by), min(ay + ah, by + bh)
+            down = max(ax, bx), min(ax + aw, bx + bw)
+            for side, touches, (lo, hi), origin in (
+                ("r", abs(ax + aw - bx) <= EDGE_SLACK, across, ay),
+                ("l", abs(bx + bw - ax) <= EDGE_SLACK, across, ay),
+                ("b", abs(ay + ah - by) <= EDGE_SLACK, down, ax),
+                ("t", abs(by + bh - ay) <= EDGE_SLACK, down, ax),
+            ):
+                if touches and hi > lo:
+                    found[i].append((side, j, lo - origin, hi - origin))
+    return found
+
+
 class Pond:
     """One desktop-type window covering a monitor."""
 
@@ -513,6 +561,10 @@ class Pond:
         self.view = make_view(uri, on_message)
         self.sent = None
         self.throttled = None
+        # px per mm, if known (the share of a linked group's animals goes by area in mm²).
+        self.pxmm = None
+        self.reset()
+        self.on_change = None
         # A reloaded page (the scene menu switches scenes that way) starts at full speed again.
         self.view.connect("load-changed", self.on_load)
 
@@ -541,6 +593,46 @@ class Pond:
     def on_load(self, _view, event):
         if event == WebKit2.LoadEvent.COMMITTED:
             self.throttled = None
+            self.reset()
+            if self.on_change:
+                self.on_change()
+
+    def reset(self):
+        """Forget the page: until the new one says it is up, it has no doors and no count."""
+        # The scene, whether it takes arrivals, the options that must match a neighbour's
+        # (its link key), its animals per monitor, and how many it holds now.
+        self.scene, self.linkable, self.key = None, False, ""
+        self.population, self.count = 0, None
+        self.doors_sent = None
+
+    def hear(self, values):
+        """The page's own news: it is up, its link key changed, or its count did."""
+        if "ready" in values:
+            self.scene, self.linkable = values["ready"], bool(values.get("links"))
+            population = values.get("population")
+            self.population = population if isinstance(population, int) and population > 0 else 0
+        if "key" in values:
+            self.key = str(values["key"])
+        if isinstance(values.get("count"), int):
+            self.count = values["count"]
+        if self.on_change:
+            self.on_change()
+
+    def area(self):
+        g = self.geometry
+        return g.width * g.height / (self.pxmm ** 2 if self.pxmm else 1)
+
+    def populate(self, n):
+        run_js(self.view, f"window.wallpaperPopulate && wallpaperPopulate({n})")
+
+    def set_doors(self, open_doors, share):
+        script = f"window.wallpaperLinks && wallpaperLinks({json.dumps(open_doors)}, {json.dumps(share)})"
+        if script != self.doors_sent:
+            self.doors_sent = script
+            run_js(self.view, script)
+
+    def arrive(self, side, x, y, data):
+        run_js(self.view, f"window.wallpaperArrive && wallpaperArrive({json.dumps(side)}, {x:.1f}, {y:.1f}, {json.dumps(data)})")
 
     def screen_area(self):
         """The monitor in screen pixels, as (x0, y0, x1, y1)."""
@@ -565,6 +657,105 @@ class Pond:
         self.sent = state
         flag = lambda b: "true" if b else "false"  # noqa: E731
         run_js(self.view, f"window.wallpaperInput && wallpaperInput({x:.0f}, {y:.0f}, {flag(active)}, {flag(clicked and active)})")
+
+
+class Layout:
+    """Joins the monitors' scenes where their edges touch, so a koi can swim from one to the next."""
+
+    def __init__(self, ponds, enabled=True):
+        self.ponds = ponds
+        rects = [(p.geometry.x, p.geometry.y, p.geometry.width, p.geometry.height) for p in ponds]
+        self.doors = doors(rects) if enabled else [[] for _ in ponds]
+        for pond in ponds:
+            pond.on_change = self.update
+
+    def linked(self, i, j):
+        a, b = self.ponds[i], self.ponds[j]
+        return a.linkable and b.linkable and a.scene == b.scene and a.key == b.key
+
+    def groups(self):
+        """The ponds joined by open doors, as lists of indices."""
+        seen, found = set(), []
+        for start in range(len(self.ponds)):
+            if start in seen:
+                continue
+            group, todo = [], [start]
+            seen.add(start)
+            while todo:
+                i = todo.pop()
+                group.append(i)
+                for _side, j, _start, _end in self.doors[i]:
+                    if j not in seen and self.linked(i, j):
+                        seen.add(j)
+                        todo.append(j)
+            found.append(group)
+        return found
+
+    def shares(self):
+        """How many animals each counted pond should hold: its group's total (each member's
+        population added up), split by area; in mm² only when every member's size is known."""
+        shares = {}
+        for group in self.groups():
+            members = [self.ponds[i] for i in group]
+            if not all(p.population for p in members):
+                continue
+            known = all(p.pxmm for p in members)
+            areas = [p.area() if known else p.geometry.width * p.geometry.height for p in members]
+            total = sum(p.population for p in members)
+            for i, a in zip(group, areas):
+                shares[i] = total * a / sum(areas)
+        return shares
+
+    def update(self):
+        """Open each page's doors to the neighbours with the same scene and look, and shut the rest;
+        each door says how far over its share the neighbour is."""
+        shares = self.shares()
+
+        def surplus(j):
+            count = self.ponds[j].count
+            return None if count is None or j not in shares else round(count - shares[j], 3)
+
+        for i, pond in enumerate(self.ponds):
+            pond.set_doors([
+                {"side": side, "from": start, "to": end, "surplus": surplus(j)}
+                for side, j, start, end in self.doors[i] if self.linked(i, j)
+            ], None if i not in shares else round(shares[i], 3))
+
+    def reconcile(self):
+        """A group short of its total (or over) gets one animal more (or less), on the pond
+        furthest from its share; koi migrating between ponds see to the rest."""
+        shares = self.shares()
+        for group in self.groups():
+            if any(i not in shares or self.ponds[i].count is None for i in group):
+                continue
+            total = sum(self.ponds[i].population for i in group)
+            have = sum(self.ponds[i].count for i in group)
+            if have == total:
+                continue
+            gap = {i: self.ponds[i].count - shares[i] for i in group}
+            pond = self.ponds[(max if have > total else min)(group, key=gap.get)]
+            step = -1 if have > total else 1
+            pond.populate(step)
+            pond.count += step  # until the page reports back
+        self.update()
+        return True
+
+    def hand_off(self, i, side, x, y, data):
+        """Pass what left pond i through `side` at its (x, y) to the neighbour there."""
+        g = self.ponds[i].geometry
+        along = y if side in "lr" else x
+        for door_side, j, start, end in self.doors[i]:
+            if door_side == side and start <= along <= end and self.linked(i, j):
+                t = self.ponds[j].geometry
+                self.ponds[j].arrive(OPPOSITE[side], g.x + x - t.x, g.y + y - t.y, data)
+                # Until both pages report back, so the next door decision sees it moved.
+                for k, step in ((i, -1), (j, 1)):
+                    if self.ponds[k].count is not None:
+                        self.ponds[k].count += step
+                self.update()
+                return
+        # The door shut on the way (the neighbour switched scenes): send it back.
+        self.ponds[i].arrive(side, x, y, data)
 
 
 class ChatOverlay:
@@ -794,6 +985,10 @@ def install(args):
         flags += " --no-chat"
     if args.monitor is not None:
         flags += f" --monitor {args.monitor}"
+    if args.size:
+        flags += " --size " + ",".join(f"{i}:{w:g}x{h:g}" for i, (w, h) in args.size.items())
+    if args.no_link:
+        flags += " --no-link"
     AUTOSTART.parent.mkdir(parents=True, exist_ok=True)
     AUTOSTART.write_text(
         "[Desktop Entry]\n"
@@ -815,6 +1010,17 @@ def main():
             raise argparse.ArgumentTypeError(f"choose from: {', '.join(SCENES)}")
         return names
 
+    def size_list(value):
+        sizes = {}
+        for item in value.split(","):
+            try:
+                index, dims = item.split(":")
+                w, h = dims.lower().split("x")
+                sizes[int(index)] = (float(w), float(h))
+            except ValueError:
+                raise argparse.ArgumentTypeError("use MONITOR:WIDTHxHEIGHT in mm, e.g. 1:597x336") from None
+        return sizes
+
     parser.add_argument("--scene", type=scene_list,
                         help=f"scene, or a comma list (one per monitor): {', '.join(SCENES)} "
                         "(default: the last one picked from the scene menu, else koi)")
@@ -828,6 +1034,9 @@ def main():
     parser.add_argument("--species", choices=["mix", "manta", "whale"], help="ocean: which animals (default mix)")
     parser.add_argument("--fps", type=int, default=24, help="frame cap; lower saves CPU (default 24)")
     parser.add_argument("--monitor", type=int, help="only this monitor index")
+    parser.add_argument("--size", type=size_list,
+                        help="screen size in mm for monitors that report none or a wrong one, e.g. 1:597x336,0:531x299")
+    parser.add_argument("--no-link", action="store_true", help="keep each monitor's scene to itself")
     parser.add_argument("--hour", type=float, help="pin the time of day (0-24) instead of following the clock")
     parser.add_argument("--cycle", type=float, help="run a whole day in this many seconds (preview)")
     parser.add_argument("--ai", choices=["claude", "chatgpt"], default="claude", help="chat box default (default claude)")
@@ -887,6 +1096,17 @@ def main():
         n = chat_on.index(True)
         overlay = None
 
+        # Pixels per mm, so every monitor draws at the same physical size.
+        pxmm = [px_per_mm(display.get_monitor(i), (args.size or {}).get(i)) for i in indices]
+        if any(pxmm) and not all(pxmm):
+            for i, v in zip(indices, pxmm):
+                if not v:
+                    print(f"monitor {i} reports no usable size; pass --size {i}:WIDTHxHEIGHT (mm) "
+                          "to draw it at the others' scale", file=sys.stderr)
+        for extra, v in zip(extras, pxmm):
+            if v:
+                extra["pxmm"] = f"{v:.3f}"
+
         def show_chat(scene):
             """The native chat controls sit over the primary monitor's scene, when it has a chat box."""
             nonlocal overlay
@@ -904,10 +1124,30 @@ def main():
                     show_chat(values["scene"])
             return received
 
+        def on_message(k, menu):
+            """What pond k's page posts: news of its own (up, link key, count), a koi leaving through
+            a door, or a menu pick."""
+            def received(values):
+                if values.keys() & {"ready", "key", "count"}:
+                    ponds[k].hear(values)
+                    return
+                handoff = values.get("handoff")
+                if isinstance(handoff, dict):
+                    side, x, y = handoff.get("side"), handoff.get("x"), handoff.get("y")
+                    if side in OPPOSITE and isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                        layout.hand_off(k, side, x, y, handoff.get("data"))
+                    return
+                menu(values)
+            return received
+
         ponds = [
-            Pond(display.get_monitor(i), page(scene, "glass" if on else "off", extra), on_menu(i, on))
-            for i, scene, on, extra in zip(indices, scenes, chat_on, extras)
+            Pond(display.get_monitor(i), page(scene, "glass" if on else "off", extra), on_message(k, on_menu(i, on)))
+            for k, (i, scene, on, extra) in enumerate(zip(indices, scenes, chat_on, extras))
         ]
+        for pond, v in zip(ponds, pxmm):
+            pond.pxmm = v
+        layout = Layout(ponds, not args.no_link)
+        GLib.timeout_add(RECONCILE_MS, layout.reconcile)
         views = [pond.view for pond in ponds]
         show_chat(scenes[n])
 

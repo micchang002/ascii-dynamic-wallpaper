@@ -130,6 +130,7 @@ Wallpaper.scene("ocean", (api) => {
   function setView(name, force) {
     if (name === view && !force) return;
     view = name;
+    api.links.rekey();
     surfaceRow = Math.max(3, Math.round(rows * 0.13));
     bedRow = rows - Math.max(2, Math.round(rows * 0.05));
     surfaceY = surfaceRow * ch;
@@ -1139,6 +1140,7 @@ Wallpaper.scene("ocean", (api) => {
   function setSpecies(name) {
     if (name === species) return;
     species = name;
+    api.links.rekey();
     spawnAll();
   }
 
@@ -1221,5 +1223,8 @@ Wallpaper.scene("ocean", (api) => {
 
   setSky(currentHour(performance.now()));
 
-  return { resize, paintBackdrop, step, draw, pointerMove, click, chat: false };
+  // Across monitors, only the same view of the same animals line up.
+  const linkKey = () => `${view}/${species}`;
+
+  return { resize, paintBackdrop, step, draw, pointerMove, click, linkKey, chat: false };
 });

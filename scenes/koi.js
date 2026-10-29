@@ -11,11 +11,18 @@
  *
  * URL params: koi=7, pads=5, hour=13.5 (pin the time of day), cycle=120 (a whole day in
  * this many seconds). Click to drop food; koi drift towards a resting cursor.
+ *
+ * Across monitors: with ?pxmm= the koi, pads and ripples keep the same size on every monitor,
+ * and a koi that swims into a door (see core/app.js) carries on in the neighbour's pond. While
+ * it crosses, both halves swim straight on, so the part still here lines up with the part there.
+ * The host keeps count across linked monitors: koi leave only from the fuller pond of the two,
+ * one at a time is sent towards a door when this pond is over its share, and when the group is
+ * short or over, a koi rises from the deep or sinks out of sight.
  */
 Wallpaper.scene("koi", (api) => {
   "use strict";
 
-  const { grid, intParam, floatParam, pointer, setTheme } = api;
+  const { grid, intParam, floatParam, pointer, setTheme, pxmm, links } = api;
   const { clamp, lerp, smoothstep, wrapAngle, rand, noise2 } = Wallpaper.math;
   const style = Wallpaper.style;
 
@@ -32,6 +39,11 @@ Wallpaper.scene("koi", (api) => {
   const GOLD = [240, 188, 68];
   const SLATE = [112, 146, 178];
   const PELLET = [196, 150, 96];
+
+  // With the monitor's size known, lengths are set in mm; U scales the rest of the px
+  // constants from the monitor they were tuned on (24" 1080p, 3.6 px/mm).
+  const U = pxmm ? pxmm / 3.6 : 1;
+  const KOI_MM = 90, PAD_MM = 19;
 
   /**
    * The pond through the day, interpolated by local hour:
@@ -152,7 +164,7 @@ Wallpaper.scene("koi", (api) => {
   const VARIETIES = ["kohaku", "sanke", "showa", "ogon", "tancho", "asagi", "butterfly"];
   const NODES = 14;
 
-  const koiLength = (scale) => clamp(Math.min(W, H) * 0.3, 150, 440) * scale;
+  const koiLength = (scale) => (pxmm ? KOI_MM * pxmm : clamp(Math.min(W, H) * 0.3, 150, 440)) * scale;
 
   /** Top-down half-width at s ∈ [0, 1] (nose → tail root), as a fraction of body length. */
   function halfWidth(s) {
@@ -163,9 +175,8 @@ Wallpaper.scene("koi", (api) => {
 
   const koi = [];
 
-  function spawnKoi(variety) {
-    const scale = rand(0.7, 1.15);
-    const k = {
+  function makeKoi(variety, scale) {
+    return {
       variety,
       scale,
       L: koiLength(scale),
@@ -181,7 +192,21 @@ Wallpaper.scene("koi", (api) => {
       finScale: variety === "butterfly" ? 1.7 : 1,
       px: new Float32Array(NODES),
       py: new Float32Array(NODES),
+      // The side of the screen it is crossing by: leaving (and gone once past) or entering.
+      leaving: null,
+      entering: null,
+      // 0..1; fade +1 while rising into view, -1 while sinking out (then gone).
+      alpha: 1,
+      fade: 0,
     };
+  }
+
+  function spawnKoi(variety, rising) {
+    const k = makeKoi(variety, rand(0.7, 1.15));
+    if (rising) {
+      k.alpha = 0;
+      k.fade = 1;
+    }
     const x = rand(W * 0.15, W * 0.85), y = rand(H * 0.15, H * 0.85);
     const seg = k.L / (NODES - 1);
     for (let i = 0; i < NODES; i++) {
@@ -192,18 +217,131 @@ Wallpaper.scene("koi", (api) => {
     koi.push(k);
   }
 
+  /** The door koi may leave by on `side` at `along`, at least `margin` from its ends, if any. */
+  function door(side, along, margin) {
+    for (const d of links.doors) {
+      if (d.side === side && along > d.from + margin && along < d.to - margin && mayLeave(d)) return d;
+    }
+    return null;
+  }
+
+  // Koi here, not counting those leaving or sinking; see countKoi().
+  let count = 0;
+
+  /** Only from the fuller pond of the two (against each one's share), so neither drifts far from it. */
+  function mayLeave(d) {
+    if (links.share === null || !Number.isFinite(d.surplus)) return true;
+    return count - links.share >= d.surplus;
+  }
+
+  /** Where a koi sent through door d heads: just past the middle of it. */
+  function doorTarget(d, L) {
+    const mid = (d.from + d.to) / 2;
+    return d.side === "l" ? [-L, mid] : d.side === "r" ? [W + L, mid] : d.side === "t" ? [mid, -L] : [mid, H + L];
+  }
+
+  /** While over its share, the pond sends one koi at a time to the door to the emptiest neighbour. */
+  let migrant = null, migrantDoor = null;
+  function pickMigrant() {
+    migrantDoor = null;
+    if (links.share !== null) {
+      let most = 1;
+      for (const d of links.doors) {
+        const gap = count - links.share - d.surplus;
+        if (Number.isFinite(gap) && gap > most) {
+          most = gap;
+          migrantDoor = d;
+        }
+      }
+    }
+    if (!migrantDoor) {
+      migrant = null;
+      return;
+    }
+    if (migrant && koi.includes(migrant) && settled(migrant)) return;
+    const [tx, ty] = doorTarget(migrantDoor, 0);
+    migrant = null;
+    let best = Infinity;
+    for (const k of koi) {
+      const d = Math.hypot(k.px[0] - tx, k.py[0] - ty);
+      if (settled(k) && d < best) {
+        best = d;
+        migrant = k;
+      }
+    }
+  }
+
+  /** Not crossing, rising or sinking. */
+  const settled = (k) => !k.leaving && !k.entering && !k.fade;
+
+  function countKoi() {
+    count = 0;
+    for (const k of koi) if (!k.leaving && k.fade >= 0) count++;
+    links.count(count);
+  }
+
+  /** How far (x, y) is past the edge on `side`; negative while on screen. */
+  function past(side, x, y) {
+    return side === "l" ? -x : side === "r" ? x - W : side === "t" ? -y : y - H;
+  }
+
+  /** Whether the whole koi, fins and all, is past the edge on `side` (`out`) or clear of it. */
+  function koiPast(k, side, out) {
+    const margin = k.L * 0.3 * k.finScale + cw;
+    for (let i = 0; i < NODES; i++) {
+      const d = past(side, k.px[i], k.py[i]);
+      if (out ? d < margin : d > -margin) return false;
+    }
+    return true;
+  }
+
   function stepKoi(k, dt) {
+    if (!k.leaving && !k.entering) steerKoi(k, dt);
+    swimKoi(k, dt);
+    if (k.fade) {
+      k.alpha = clamp(k.alpha + (k.fade * dt) / FADE_S, 0, 1);
+      if (k.alpha === 1) k.fade = 0;
+      else if (k.alpha === 0) k.gone = true;
+    }
+  }
+
+  const FADE_S = 3;
+
+  /** The host's count is off: n koi rise from the deep (or -n sink out of sight). */
+  function populate(n) {
+    for (let i = 0; i < n; i++) spawnKoi(VARIETIES[(Math.random() * VARIETIES.length) | 0], true);
+    const going = koi.filter(settled);
+    for (let i = 0; i < -n && going.length; i++) {
+      // Not the one on its way to a door, if there is another.
+      const pick = going.length > 1 ? going.filter((k) => k !== migrant) : going;
+      const k = pick[(Math.random() * pick.length) | 0];
+      k.fade = -1;
+      going.splice(going.indexOf(k), 1);
+    }
+    countKoi();
+  }
+
+  function steerKoi(k, dt) {
     const L = k.L;
     const hx = k.px[0], hy = k.py[0];
     let fx = Math.cos(k.angle), fy = Math.sin(k.angle);
     let urgency = 0;
 
-    // Soft walls: turn back well before the edge.
-    const m = L * 0.9;
-    if (hx < m) fx += ((m - hx) / m) * 2.5;
-    if (hx > W - m) fx -= ((hx - (W - m)) / m) * 2.5;
-    if (hy < m) fy += ((m - hy) / m) * 2.5;
-    if (hy > H - m) fy -= ((hy - (H - m)) / m) * 2.5;
+    // Soft walls: turn back well before the edge, unless it is a door wide enough for the body.
+    // A koi rising or sinking stays put: doors are walls to it.
+    const m = L * 0.9, wide = L * 0.15;
+    const open = (side, along) => !k.fade && door(side, along, wide);
+    if (hx < m && !open("l", hy)) fx += ((m - hx) / m) * 2.5;
+    if (hx > W - m && !open("r", hy)) fx -= ((hx - (W - m)) / m) * 2.5;
+    if (hy < m && !open("t", hx)) fy += ((m - hy) / m) * 2.5;
+    if (hy > H - m && !open("b", hx)) fy -= ((hy - (H - m)) / m) * 2.5;
+
+    if (k === migrant && migrantDoor) {
+      const [tx, ty] = doorTarget(migrantDoor, L);
+      const d = Math.hypot(tx - hx, ty - hy) || 1;
+      fx += ((tx - hx) / d) * 1.6;
+      fy += ((ty - hy) / d) * 1.6;
+    }
 
     // Keep a little personal space (head vs. the other fish's middle).
     for (const o of koi) {
@@ -261,6 +399,17 @@ Wallpaper.scene("koi", (api) => {
 
     const target = L * (k.cruise + urgency * 0.35);
     k.speed += (target - k.speed) * Math.min(1, dt * 1.2);
+  }
+
+  /** Swim on along the heading; crossing a door hands the koi to the neighbour. */
+  function swimKoi(k, dt) {
+    const L = k.L;
+    // Mid-crossing, both halves turn alike towards straight across, so a koi that came in
+    // along the edge doesn't glide down it for minutes.
+    if (k.leaving || k.entering) {
+      const across = ACROSS[k.leaving || OPPOSITE[k.entering]];
+      k.angle = wrapAngle(k.angle + clamp(wrapAngle(across - k.angle), -0.6 * dt, 0.6 * dt));
+    }
     k.phase += dt * (2.2 + (k.speed / L) * 9);
 
     // Head leads; every node follows at a fixed spacing.
@@ -276,6 +425,57 @@ Wallpaper.scene("koi", (api) => {
 
     addEnergy(k.px[1], k.py[1], 0.05 + (k.speed / L) * 0.12);
     addEnergy(k.px[NODES - 1], k.py[NODES - 1], 0.08);
+
+    if (k.leaving) {
+      if (koiPast(k, k.leaving, true)) k.gone = true;
+    } else if (k.entering) {
+      if (koiPast(k, k.entering, false)) k.entering = null;
+    } else if (!k.fade) {
+      const hx = k.px[0], hy = k.py[0];
+      const side = hx < 0 ? "l" : hx > W ? "r" : hy < 0 ? "t" : hy > H ? "b" : null;
+      if (side && door(side, side === "l" || side === "r" ? hy : hx, 0)) handOff(k, side);
+    }
+  }
+
+  const OPPOSITE = { l: "r", r: "l", t: "b", b: "t" };
+  // The heading straight out through each side.
+  const ACROSS = { l: Math.PI, r: 0, t: -Math.PI / 2, b: Math.PI / 2 };
+  // Each koi's own look and swim, passed on as they are; the spine goes relative to the head, in body lengths.
+  const KEPT = ["variety", "scale", "seed", "depth", "angle", "cruise", "wander", "phase", "finScale"];
+
+  function handOff(k, side) {
+    const data = { speed: k.speed / k.L, spine: [] };
+    for (const key of KEPT) data[key] = k[key];
+    for (let i = 0; i < NODES; i++) data.spine.push((k.px[i] - k.px[0]) / k.L, (k.py[i] - k.py[0]) / k.L);
+    links.send(side, k.px[0], k.py[0], data);
+    k.leaving = side;
+    count--;
+  }
+
+  /** A koi swims in through the edge on `side`, its head at (x, y). */
+  function arrive(side, x, y, data) {
+    if (!data || !VARIETIES.includes(data.variety) || !Array.isArray(data.spine) || data.spine.length !== NODES * 2) return;
+    const k = makeKoi(data.variety, clamp(+data.scale || 1, 0.5, 1.5));
+    for (const key of KEPT) if (key !== "variety" && key !== "scale" && Number.isFinite(data[key])) k[key] = data[key];
+    k.L = koiLength(k.scale);
+    k.speed = clamp(+data.speed || k.cruise, 0.1, 1) * k.L;
+    for (let i = 0; i < NODES; i++) {
+      k.px[i] = x + data.spine[i * 2] * k.L;
+      k.py[i] = y + data.spine[i * 2 + 1] * k.L;
+    }
+    // Sent back through the door it left by: mirror it in that edge, so it turns back into the pond.
+    const inward = { l: [1, 0], r: [-1, 0], t: [0, 1], b: [0, -1] }[side];
+    if (Math.cos(k.angle) * inward[0] + Math.sin(k.angle) * inward[1] < 0) {
+      const horizontal = side === "l" || side === "r", edge = { l: 0, r: W, t: 0, b: H }[side];
+      for (let i = 0; i < NODES; i++) {
+        if (horizontal) k.px[i] = 2 * edge - k.px[i];
+        else k.py[i] = 2 * edge - k.py[i];
+      }
+      k.angle = horizontal ? wrapAngle(Math.PI - k.angle) : -k.angle;
+    }
+    k.entering = side;
+    koi.push(k);
+    countKoi();
   }
 
   // Scratch spine for the koi being drawn (with the swimming wave applied).
@@ -438,7 +638,8 @@ Wallpaper.scene("koi", (api) => {
     const c0 = Math.max(0, Math.floor((minX - pad) / cw)), c1 = Math.min(cols - 1, Math.floor((maxX + pad) / cw));
     const r0 = Math.max(0, Math.floor((minY - pad) / ch)), r1 = Math.min(rows - 1, Math.floor((maxY + pad) / ch));
     // Deeper koi fade into a dark pond; by day they stay solid so they don't wash out.
-    const depthAlpha = lerp(0.55 + 0.45 * k.depth, 1, clamp(sky.shadow / 0.35, 0, 1));
+    const depthAlpha = lerp(0.55 + 0.45 * k.depth, 1, clamp(sky.shadow / 0.35, 0, 1)) * k.alpha;
+    if (depthAlpha < 0.02) return;
     // Beyond these distances from the spine nothing can be hit: skip the supersampling.
     const diag = Math.hypot(cw, ch) * 0.5;
     const bodyReach = L * (0.14 + 0.13 * k.finScale) + diag;
@@ -491,7 +692,7 @@ Wallpaper.scene("koi", (api) => {
 
   /** A soft blob under each koi, offset away from the sun; only visible by day. */
   function drawShadow(k) {
-    const strength = sky.shadow * (0.6 + 0.4 * k.depth);
+    const strength = sky.shadow * (0.6 + 0.4 * k.depth) * k.alpha;
     if (strength < 0.03) return;
     const L = k.L, ox = L * 0.07, oy = L * 0.1;
     const st = style(sky.edge[0] * 0.5, sky.edge[1] * 0.5, sky.edge[2] * 0.5, strength);
@@ -514,13 +715,13 @@ Wallpaper.scene("koi", (api) => {
   const pads = [];
 
   function addRipple(x, y, strength, maxR) {
-    ripples.push({ x, y, r: 0, strength, maxR: maxR || rand(120, 220) });
+    ripples.push({ x, y, r: 0, strength, maxR: maxR || rand(120, 220) * U });
   }
 
   function drawRipples(dt) {
     for (let i = ripples.length - 1; i >= 0; i--) {
       const rp = ripples[i];
-      rp.r += dt * 70;
+      rp.r += dt * 70 * U;
       if (rp.r > rp.maxR) {
         ripples.splice(i, 1);
         continue;
@@ -550,24 +751,24 @@ Wallpaper.scene("koi", (api) => {
         food.splice(i, 1);
         continue;
       }
-      p.x += Math.sin(t * 0.7 + p.seed) * dt * 4;
-      p.y += Math.cos(t * 0.6 + p.seed) * dt * 4;
+      p.x += Math.sin(t * 0.7 + p.seed) * dt * 4 * U;
+      p.y += Math.cos(t * 0.6 + p.seed) * dt * 4 * U;
       put(Math.floor(p.x / cw), Math.floor(p.y / ch), "o", st);
     }
   }
 
   function spawnPads() {
     pads.length = 0;
-    const base = clamp(Math.min(W, H) * 0.065, 36, 100);
+    const base = pxmm ? PAD_MM * pxmm : clamp(Math.min(W, H) * 0.065, 36, 100);
     for (let tries = 0; pads.length < PAD_COUNT && tries < 400; tries++) {
       const R = base * rand(0.6, 1.3);
       const x = rand(R, W - R), y = rand(R, H - R);
-      if (pads.some((p) => Math.hypot(p.x - x, p.y - y) < p.R + R + 30)) continue;
+      if (pads.some((p) => Math.hypot(p.x - x, p.y - y) < p.R + R + 30 * U)) continue;
       pads.push({
         x, y, R,
         rot: rand(0, Math.PI * 2),
         spin: rand(-0.02, 0.02),
-        vx: rand(-3, 3), vy: rand(-2, 2),
+        vx: rand(-3, 3) * U, vy: rand(-2, 2) * U,
         flower: Math.random() < 0.45,
         seed: rand(0, 100),
       });
@@ -641,7 +842,7 @@ Wallpaper.scene("koi", (api) => {
   /** Caustics drift slowly, so each frame refreshes only every third row. */
   function drawFloor(t) {
     for (let r = frameNo % 3; r < rows; r += 3) {
-      const y = (r + 0.5) * ch;
+      const y = ((r + 0.5) * ch) / U;
       for (let c = 0; c < cols; c++) {
         const i = r * cols + c;
         const e = energy[i];
@@ -651,7 +852,7 @@ Wallpaper.scene("koi", (api) => {
           if (e < 0.06) continue;
           g = e > 0.3 ? "~" : ".";
         }
-        const x = (c + 0.5) * cw;
+        const x = ((c + 0.5) * cw) / U;
         const caustic = Math.max(0,
           Math.sin(x * 0.011 + t * 0.5 + Math.sin(y * 0.013 - t * 0.35) * 2) *
           Math.sin(y * 0.015 - t * 0.45 + Math.sin(x * 0.008 + t * 0.3) * 2));
@@ -677,13 +878,16 @@ Wallpaper.scene("koi", (api) => {
       skyPainted = now;
     }
 
+    pickMigrant();
     for (const k of koi) stepKoi(k, dt);
+    for (let i = koi.length - 1; i >= 0; i--) if (koi[i].gone) koi.splice(i, 1);
+    countKoi();
     diffuseEnergy();
 
     rainTimer -= dt;
     if (rainTimer <= 0) {
       const x = rand(0, W), y = rand(0, H);
-      addRipple(x, y, 0.45, rand(60, 140));
+      addRipple(x, y, 0.45, rand(60, 140) * U);
       addEnergy(x, y, 0.6);
       rainTimer = rand(2, 7);
     }
@@ -719,14 +923,14 @@ Wallpaper.scene("koi", (api) => {
   }
 
   function click(x, y) {
-    addRipple(x, y, 1, 200);
+    addRipple(x, y, 1, 200 * U);
     addEnergy(x, y, 1.2);
     for (let i = 0; i < 5; i++) {
-      food.push({ x: x + rand(-24, 24), y: y + rand(-16, 16), life: 30, seed: rand(0, 100) });
+      food.push({ x: x + rand(-24, 24) * U, y: y + rand(-16, 16) * U, life: 30, seed: rand(0, 100) });
     }
   }
 
   setSky(currentHour(performance.now()));
 
-  return { resize, paintBackdrop, step, draw, pointerMove, click };
+  return { resize, paintBackdrop, step, draw, pointerMove, click, arrive, populate, population: KOI_COUNT };
 });
