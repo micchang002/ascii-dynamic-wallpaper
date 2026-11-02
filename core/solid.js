@@ -4,7 +4,8 @@
  * Space is the screen's: a to the right, b down, d toward the viewer, all in px. A scene
  * describes each creature as surfaces (a tube around a spine, a flapping disc, fin sheets)
  * and splat()s points over them densely enough that every covered cell is hit. Points
- * are projected with a gentle perspective about the screen centre; each cell keeps the
+ * are projected with a gentle perspective about the screen centre (or the eye monitors share,
+ * see core/app.js); each cell keeps the
  * point nearest the viewer (a z-buffer). resolve() then turns the buffer into glyphs: a
  * dense ramp by light on solid parts, soft rims along silhouettes (like the koi), and
  * whatever stroke glyph the scene asked for on fins and features.
@@ -48,8 +49,10 @@
   // -------------------------------------------------------------- buffer
 
   class Solid {
-    constructor(grid) {
+    /** eye: { x, y, dist } in px, the viewer's place when monitors share one (api.eye). */
+    constructor(grid, eye = null) {
       this.grid = grid;
+      this.eye = eye;
       this.frame = 0;
       this.count = 0;
       this.cx = 0;
@@ -69,9 +72,10 @@
       this.alpha = new Float32Array(n);
       this.glyph = new Array(n).fill("");
       this.touched = new Int32Array(n);
-      this.cx = W / 2;
-      this.cy = H / 2;
-      this.F = Math.max(W, H) * 2.5;
+      const eye = this.eye;
+      this.cx = eye ? eye.x : W / 2;
+      this.cy = eye ? eye.y : H / 2;
+      this.F = eye ? eye.dist : Math.max(W, H) * 2.5;
       this.frame++;
       this.count = 0;
     }

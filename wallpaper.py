@@ -552,6 +552,90 @@ def doors(rects):
     return found
 
 
+def components(found):
+    """The monitors joined by touching edges (doors() lists), as lists of indices."""
+    seen, groups = set(), []
+    for start in range(len(found)):
+        if start in seen:
+            continue
+        group, todo = [], [start]
+        seen.add(start)
+        while todo:
+            i = todo.pop()
+            group.append(i)
+            for _side, j, _start, _end in found[i]:
+                if j not in seen:
+                    seen.add(j)
+                    todo.append(j)
+        groups.append(group)
+    return groups
+
+
+def placement(rects, pxmm, group):
+    """Where each monitor in a group of touching ones stands on the desk, as (x, y) of its top
+    left in mm: the first as laid out, each next one butted against a placed neighbour, lined
+    up at the middle of the edge they share (the layout only says which edges touch, and
+    monitors of different px per mm can't line up all along one). None if a size is unknown."""
+    if not all(pxmm[i] for i in group):
+        return None
+    found = doors(rects)
+    first = group[0]
+    at = {first: (rects[first][0] / pxmm[first], rects[first][1] / pxmm[first])}
+    todo = [first]
+    while todo:
+        i = todo.pop(0)
+        (ux, uy), p = at[i], pxmm[i]
+        for side, j, start, end in found[i]:
+            if j in at:
+                continue
+            q, (x, y, w, h) = pxmm[j], rects[j]
+            mid = (start + end) / 2
+            if side in "lr":
+                vx = ux + rects[i][2] / p if side == "r" else ux - w / q
+                vy = uy + mid / p - (rects[i][1] + mid - y) / q
+            else:
+                vy = uy + rects[i][3] / p if side == "b" else uy - h / q
+                vx = ux + mid / p - (rects[i][0] + mid - x) / q
+            at[j] = (vx, vy)
+            todo.append(j)
+    return at
+
+
+def eyes(rects, pxmm):
+    """Where the viewer stands for each monitor (x, y, dist) in its own px, so 3D scenes on
+    monitors that touch share one perspective: in front of the middle of them all (on the desk,
+    see placement()); None for a monitor on its own (it keeps its own centre)."""
+    found = [None] * len(rects)
+    for group in components(doors(rects)):
+        if len(group) < 2:
+            continue
+        at = placement(rects, pxmm, group)
+        if at:
+            boxes = {i: (*at[i], at[i][0] + rects[i][2] / pxmm[i], at[i][1] + rects[i][3] / pxmm[i]) for i in group}
+            scale = {i: pxmm[i] for i in group}
+        else:
+            boxes = {i: (x, y, x + w, y + h) for i, (x, y, w, h) in ((i, rects[i]) for i in group)}
+            scale = {i: 1 for i in group}
+        x0, y0 = min(b[0] for b in boxes.values()), min(b[1] for b in boxes.values())
+        x1, y1 = max(b[2] for b in boxes.values()), max(b[3] for b in boxes.values())
+        cx, cy, span = (x0 + x1) / 2, (y0 + y1) / 2, max(x1 - x0, y1 - y0)
+        # A single monitor's eye is 2.5 times its long side back; here the whole span's.
+        for i in group:
+            k = scale[i]
+            found[i] = ((cx - boxes[i][0]) * k, (cy - boxes[i][1]) * k, 2.5 * span * k)
+    return found
+
+
+def through(side, x, y, here, there, door_here, door_there):
+    """(x, y) past pond `here`'s `side` in the other's px, the two butted together at the
+    middle of the door (see placement()): what is 1 mm past this edge is 1 mm inside that one."""
+    k = there.pxmm / here.pxmm if here.pxmm and there.pxmm else 1
+    g, t = here.geometry, there.geometry
+    past = {"l": -x, "r": x - g.width, "t": -y, "b": y - g.height}[side] * k
+    along = (door_there[0] + door_there[1]) / 2 + ((y if side in "lr" else x) - (door_here[0] + door_here[1]) / 2) * k
+    return {"l": (t.width - past, along), "r": (past, along), "t": (along, t.height - past), "b": (along, past)}[side]
+
+
 class Pond:
     """One desktop-type window covering a monitor."""
 
@@ -600,21 +684,31 @@ class Pond:
     def reset(self):
         """Forget the page: until the new one says it is up, it has no doors and no count."""
         # The scene, whether it takes arrivals, the options that must match a neighbour's
-        # (its link key), its animals per monitor, and how many it holds now.
-        self.scene, self.linkable, self.key = None, False, ""
-        self.population, self.count = 0, None
+        # (its link key), the sides doors may open on, its animals per monitor by kind, and how
+        # many of each it holds now.
+        self.scene, self.linkable, self.key, self.sides = None, False, "", ""
+        self.population, self.count = {}, None
         self.doors_sent = None
 
+    @staticmethod
+    def kinds(value, least):
+        """{kind: n} from the page, keeping whole numbers of at least `least`."""
+        if not isinstance(value, dict):
+            return {}
+        return {str(k): n for k, n in value.items() if isinstance(n, int) and not isinstance(n, bool) and n >= least}
+
     def hear(self, values):
-        """The page's own news: it is up, its link key changed, or its count did."""
+        """The page's own news: it is up, its link terms changed, or its count did."""
         if "ready" in values:
             self.scene, self.linkable = values["ready"], bool(values.get("links"))
-            population = values.get("population")
-            self.population = population if isinstance(population, int) and population > 0 else 0
         if "key" in values:
             self.key = str(values["key"])
-        if isinstance(values.get("count"), int):
-            self.count = values["count"]
+        if "sides" in values:
+            self.sides = "".join(c for c in str(values["sides"]) if c in OPPOSITE)
+        if "population" in values:
+            self.population = self.kinds(values["population"], 1)
+        if isinstance(values.get("count"), dict):
+            self.count = self.kinds(values["count"], 0)
         if self.on_change:
             self.on_change()
 
@@ -622,8 +716,8 @@ class Pond:
         g = self.geometry
         return g.width * g.height / (self.pxmm ** 2 if self.pxmm else 1)
 
-    def populate(self, n):
-        run_js(self.view, f"window.wallpaperPopulate && wallpaperPopulate({n})")
+    def populate(self, n, kind):
+        run_js(self.view, f"window.wallpaperPopulate && wallpaperPopulate({n}, {json.dumps(kind)})")
 
     def set_doors(self, open_doors, share):
         script = f"window.wallpaperLinks && wallpaperLinks({json.dumps(open_doors)}, {json.dumps(share)})"
@@ -660,7 +754,7 @@ class Pond:
 
 
 class Layout:
-    """Joins the monitors' scenes where their edges touch, so a koi can swim from one to the next."""
+    """Joins the monitors' scenes where their edges touch, so an animal can swim from one to the next."""
 
     def __init__(self, ponds, enabled=True):
         self.ponds = ponds
@@ -673,27 +767,22 @@ class Layout:
         a, b = self.ponds[i], self.ponds[j]
         return a.linkable and b.linkable and a.scene == b.scene and a.key == b.key
 
+    def open_doors(self, i):
+        """Pond i's doors that are open: to a neighbour with the same scene and look, on a
+        side both allow (a side view's sea has no door in its floor)."""
+        return [
+            (side, j, start, end) for side, j, start, end in self.doors[i]
+            if self.linked(i, j) and side in self.ponds[i].sides and OPPOSITE[side] in self.ponds[j].sides
+        ]
+
     def groups(self):
         """The ponds joined by open doors, as lists of indices."""
-        seen, found = set(), []
-        for start in range(len(self.ponds)):
-            if start in seen:
-                continue
-            group, todo = [], [start]
-            seen.add(start)
-            while todo:
-                i = todo.pop()
-                group.append(i)
-                for _side, j, _start, _end in self.doors[i]:
-                    if j not in seen and self.linked(i, j):
-                        seen.add(j)
-                        todo.append(j)
-            found.append(group)
-        return found
+        return components([self.open_doors(i) for i in range(len(self.ponds))])
 
     def shares(self):
-        """How many animals each counted pond should hold: its group's total (each member's
-        population added up), split by area; in mm² only when every member's size is known."""
+        """How many animals of each kind each counted pond should hold: its group's total (each
+        member's population added up), split by area; in mm² only when every member's size is
+        known."""
         shares = {}
         for group in self.groups():
             members = [self.ponds[i] for i in group]
@@ -701,57 +790,63 @@ class Layout:
                 continue
             known = all(p.pxmm for p in members)
             areas = [p.area() if known else p.geometry.width * p.geometry.height for p in members]
-            total = sum(p.population for p in members)
+            kinds = {k for p in members for k in p.population}
+            totals = {k: sum(p.population.get(k, 0) for p in members) for k in kinds}
             for i, a in zip(group, areas):
-                shares[i] = total * a / sum(areas)
+                shares[i] = {k: n * a / sum(areas) for k, n in totals.items()}
         return shares
 
     def update(self):
         """Open each page's doors to the neighbours with the same scene and look, and shut the rest;
-        each door says how far over its share the neighbour is."""
+        each door says how far over its share the neighbour is, by kind."""
         shares = self.shares()
 
         def surplus(j):
             count = self.ponds[j].count
-            return None if count is None or j not in shares else round(count - shares[j], 3)
+            if count is None or j not in shares:
+                return None
+            return {k: round(count.get(k, 0) - share, 3) for k, share in shares[j].items()}
 
         for i, pond in enumerate(self.ponds):
             pond.set_doors([
                 {"side": side, "from": start, "to": end, "surplus": surplus(j)}
-                for side, j, start, end in self.doors[i] if self.linked(i, j)
-            ], None if i not in shares else round(shares[i], 3))
+                for side, j, start, end in self.open_doors(i)
+            ], None if i not in shares else {k: round(v, 3) for k, v in shares[i].items()})
 
     def reconcile(self):
-        """A group short of its total (or over) gets one animal more (or less), on the pond
-        furthest from its share; koi migrating between ponds see to the rest."""
+        """A group short of its total of a kind (or over) gets as many more (or fewer), one at a
+        time on whichever pond is then furthest from its share; animals migrating between ponds
+        see to the rest."""
         shares = self.shares()
         for group in self.groups():
             if any(i not in shares or self.ponds[i].count is None for i in group):
                 continue
-            total = sum(self.ponds[i].population for i in group)
-            have = sum(self.ponds[i].count for i in group)
-            if have == total:
-                continue
-            gap = {i: self.ponds[i].count - shares[i] for i in group}
-            pond = self.ponds[(max if have > total else min)(group, key=gap.get)]
-            step = -1 if have > total else 1
-            pond.populate(step)
-            pond.count += step  # until the page reports back
+            for kind in shares[group[0]]:
+                total = sum(self.ponds[i].population.get(kind, 0) for i in group)
+                have = sum(self.ponds[i].count.get(kind, 0) for i in group)
+                step = -1 if have > total else 1
+                for _ in range(abs(have - total)):
+                    gap = {i: self.ponds[i].count.get(kind, 0) - shares[i][kind] for i in group}
+                    pond = self.ponds[(max if step < 0 else min)(group, key=gap.get)]
+                    pond.populate(step, kind)
+                    pond.count[kind] = pond.count.get(kind, 0) + step  # until the page reports back
         self.update()
         return True
 
     def hand_off(self, i, side, x, y, data):
         """Pass what left pond i through `side` at its (x, y) to the neighbour there."""
-        g = self.ponds[i].geometry
         along = y if side in "lr" else x
-        for door_side, j, start, end in self.doors[i]:
-            if door_side == side and start <= along <= end and self.linked(i, j):
-                t = self.ponds[j].geometry
-                self.ponds[j].arrive(OPPOSITE[side], g.x + x - t.x, g.y + y - t.y, data)
+        for door_side, j, start, end in self.open_doors(i):
+            if door_side == side and start <= along <= end:
+                back = next((s, e) for d, k, s, e in self.doors[j] if d == OPPOSITE[side] and k == i)
+                tx, ty = through(side, x, y, self.ponds[i], self.ponds[j], (start, end), back)
+                self.ponds[j].arrive(OPPOSITE[side], tx, ty, data)
                 # Until both pages report back, so the next door decision sees it moved.
+                kind = str(data.get("kind", "all")) if isinstance(data, dict) else "all"
                 for k, step in ((i, -1), (j, 1)):
-                    if self.ponds[k].count is not None:
-                        self.ponds[k].count += step
+                    count = self.ponds[k].count
+                    if count is not None:
+                        count[kind] = count.get(kind, 0) + step
                 self.update()
                 return
         # The door shut on the way (the neighbour switched scenes): send it back.
@@ -1106,6 +1201,15 @@ def main():
         for extra, v in zip(extras, pxmm):
             if v:
                 extra["pxmm"] = f"{v:.3f}"
+        # One perspective for monitors that touch, so a 3D body is drawn alike on both sides.
+        if not args.no_link:
+            rects = []
+            for i in indices:
+                g = display.get_monitor(i).get_geometry()
+                rects.append((g.x, g.y, g.width, g.height))
+            for extra, eye in zip(extras, eyes(rects, pxmm)):
+                if eye:
+                    extra["eye"] = ",".join(f"{v:.1f}" for v in eye)
 
         def show_chat(scene):
             """The native chat controls sit over the primary monitor's scene, when it has a chat box."""
@@ -1125,10 +1229,10 @@ def main():
             return received
 
         def on_message(k, menu):
-            """What pond k's page posts: news of its own (up, link key, count), a koi leaving through
-            a door, or a menu pick."""
+            """What pond k's page posts: news of its own (up, link terms, count), an animal leaving
+            through a door, or a menu pick."""
             def received(values):
-                if values.keys() & {"ready", "key", "count"}:
+                if values.keys() & {"ready", "key", "sides", "population", "count"}:
                     ponds[k].hear(values)
                     return
                 handoff = values.get("handoff")

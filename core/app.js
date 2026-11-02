@@ -14,12 +14,13 @@
  *     click(x, y),             // optional
  *     arrive(side, x, y, data),// optional: an animal swims in from the next monitor (below)
  *     linkKey(),               // optional: the options that must match for doors to open
- *     population: 7,           // optional: animals per monitor, when the host keeps count
- *     populate(n),             // optional: bring in n more animals (n < 0: let -n go)
+ *     linkSides(),             // optional: the edges doors may open on (default "lrtb")
+ *     population(),            // optional: animals per monitor by kind, { koi: 7 }, when the host keeps count
+ *     populate(n, kind),       // optional: bring in n more of a kind (n < 0: let -n go)
  *     chat: false,             // optional: this scene has no chat box
  *   }));
  *
- * where api = { grid, params, intParam, floatParam, pointer, stats, setTheme, pxmm, links }. setTheme("light" |
+ * where api = { grid, params, intParam, floatParam, pointer, stats, setTheme, pxmm, eye, links }. setTheme("light" |
  * "dark") tells the chat box which way to style itself; stats.data holds the latest system
  * readings (CPU, memory, GPU) when a host sends them.
  *
@@ -38,14 +39,21 @@
  * from links.doors. links.send(side, x, y, data) passes something leaving through a door to the
  * neighbour, whose scene gets arrive(side it comes in by, x, y, data) in its own px; a door that
  * shut on the way sends it back through the same side. Doors open only between scenes whose
- * linkKey() matches (say ocean's view and species); a scene that changes those in place calls
- * links.rekey().
+ * linkKey() matches (say ocean's view and species), on sides both allow (linkSides()); a scene
+ * that changes those or its population in place calls links.rekey(). core/crossing.js does the
+ * scene's half of all this.
  *
- * Keeping count: a scene with a population reports how many animals it holds with
- * links.count(n). The host gives every monitor in a linked group a share of the group's total
- * (by area), as links.share, and each door the neighbour's surplus (its count minus its share),
- * so the scene can send animals from the fuller side; when the group's total is off, the host
- * calls populate(±1) on the monitor furthest from its share. Without a host, links.share is null.
+ * Keeping count: a scene with a population reports how many animals of each kind it holds with
+ * links.count({ kind: n }). The host gives every monitor in a linked group a share of the group's
+ * total (by area), as links.share = { kind: share }, and each door the neighbour's surplus (its
+ * count minus its share, by kind), so the scene can send animals from the fuller side; when the
+ * group's total is off, the host calls populate(±1, kind) on the monitor furthest from its share.
+ * Without a host, links.share is null.
+ *
+ * 3D scenes: ?eye=x,y,dist is where the viewer stands, in this monitor's px: the point straight
+ * ahead and how far back. Monitors that touch share one (the host works it out), so a body
+ * crossing between them is drawn in the same perspective on both; without it, each monitor's
+ * own centre (core/solid.js).
  */
 (() => {
   "use strict";
@@ -68,6 +76,10 @@
   const PXMM = Math.max(0, floatParam("pxmm", 0));
   // About what ~W/190 gives on a 24" 1080p or 27" 1440p monitor.
   const CELL_MM = 2.8;
+  const EYE = (() => {
+    const v = (params.get("eye") || "").split(",").map(Number);
+    return v.length === 3 && v.every(Number.isFinite) && v[2] > 0 ? { x: v[0], y: v[1], dist: v[2] } : null;
+  })();
 
   /** A message to the host: wallpaper.py, or a page that holds this one in a frame (dev/screens.html). */
   function post(message) {
@@ -81,12 +93,15 @@
     doors: [],
     share: null,
     send: (side, x, y, data) => post({ handoff: { side, x, y, data } }),
-    count: (n) => n !== reported && post({ count: (reported = n) }),
+    count: (counts) => {
+      const json = JSON.stringify(counts);
+      if (json !== reported) post({ count: counts }), (reported = json);
+    },
     rekey: () => rekey(),
   };
   window.wallpaperLinks = (doors, share) => {
     links.doors = Array.isArray(doors) ? doors : [];
-    links.share = Number.isFinite(share) ? share : null;
+    links.share = share && typeof share === "object" ? share : null;
   };
 
   const setTheme = (theme) => {
@@ -110,7 +125,7 @@
     const grid = new Wallpaper.Grid(canvas);
     const pointer = { x: 0, y: 0, active: false, moved: 0 };
     const stats = { data: null };
-    const scene = factory({ grid, params, intParam, floatParam, pointer, stats, setTheme, pxmm: PXMM, links });
+    const scene = factory({ grid, params, intParam, floatParam, pointer, stats, setTheme, pxmm: PXMM, eye: EYE, links });
     window.wallpaperStats = (data) => {
       stats.data = data;
     };
@@ -201,14 +216,19 @@
     document.addEventListener("visibilitychange", schedule);
 
     window.wallpaperArrive = (side, x, y, data) => scene.arrive && scene.arrive(side, x, y, data);
-    window.wallpaperPopulate = (n) => scene.populate && Number.isInteger(n) && scene.populate(n);
-    const linkKey = () => (scene.linkKey ? String(scene.linkKey()) : "");
+    window.wallpaperPopulate = (n, kind) => scene.populate && Number.isInteger(n) && scene.populate(n, kind);
+    // What decides which doors open: the options that must match, the sides, the population.
+    const terms = () => ({
+      key: scene.linkKey ? String(scene.linkKey()) : "",
+      sides: scene.linkSides ? String(scene.linkSides()) : "lrtb",
+      population: scene.population ? scene.population() : {},
+    });
 
     resize();
     schedule();
     // Doors open only between scenes that take arrivals and look alike.
-    post({ ready: sceneName, links: !!scene.arrive, key: linkKey(), population: scene.population || 0 });
-    rekey = () => post({ key: linkKey() });
+    post({ ready: sceneName, links: !!scene.arrive, ...terms() });
+    rekey = () => post(terms());
   }
 
   const script = document.createElement("script");

@@ -11,20 +11,26 @@
  * Varieties: ryukin, oranda (and a red-capped tancho oranda), black telescope-eye
  * demekin, ranchu (no dorsal fin), comet and calico shubunkin.
  *
- * The tank has gravel, swaying vallisneria (some in front of the fish), a bubbling air
- * stone and rippling light from the lamp. The lamp follows the clock: off at night, when
- * a dim blue light comes on and the fish doze near the bottom.
+ * The water fills the screen: the waterline and the gravel lie just past its top and
+ * bottom edges. Swaying vallisneria (some in front of the fish) and a bubbling air stone
+ * rise from the bottom, and the lamp's light ripples through the water. The lamp follows
+ * the clock: off at night, when a dim blue light comes on and the fish doze near the bottom.
  *
  * Click to sprinkle flakes: they float, then sink, and the fish chase them up and down.
- * The fish pick at the gravel now and then. A fast cursor startles them. The tank runs on
+ * The fish nose down to the gravel now and then. A fast cursor startles them. The tank runs on
  * past the screen's sides; when a fish swims off one, another swims in, so `fish` stay in view.
+ *
+ * Across monitors side by side: with ?pxmm= the fish keep the same size on each, and ?eye=
+ * gives them one perspective (see core/app.js). The tank runs on into the next monitor: a fish
+ * that swims into a door carries on there (core/crossing.js), and the host keeps count, so on
+ * an edge with no door fish swim off and in only when the group is short or over.
  *
  * URL params: fish=7 (in view), hour=13.5, cycle=120.
  */
 Wallpaper.scene("tank", (api) => {
   "use strict";
 
-  const { grid, intParam, floatParam, pointer, setTheme } = api;
+  const { grid, intParam, floatParam, pointer, setTheme, pxmm, eye, links } = api;
   const { clamp, lerp, smoothstep, rand, hash2, noise2 } = Wallpaper.math;
   const style = Wallpaper.style;
   const { Solid, Chain, dot, cross, len, norm, add, rotate, turnToward } = Wallpaper.solid;
@@ -77,13 +83,13 @@ Wallpaper.scene("tank", (api) => {
   // ----------------------------------------------------------------- grid
 
   let W = 0, H = 0, cw = 10, ch = 15, cols = 0, rows = 0;
-  const solid = new Solid(grid);
+  const solid = new Solid(grid, eye);
   const put = (c, r, g, st) => grid.put(c, r, g, st);
 
   const UP = [0, -1, 0];
   const LIGHT = norm([-0.25, -0.85, 0.45]);
   const FILL = norm([0.3, 0.2, 0.93]);
-  /** Rows of the waterline and the top of the gravel; the tank's depth range. */
+  /** Rows of the waterline and the top of the gravel, just off the screen; the tank's depth range. */
   let surfaceRow = 0, gravelRow = 0, surfaceY = 0, gravelY = 0, D0 = -300, D1 = 60;
   let dotChar = [];
   let frameNo = 0;
@@ -91,12 +97,14 @@ Wallpaper.scene("tank", (api) => {
   function resize() {
     ({ W, H, cw, ch, cols, rows } = grid);
     solid.resize();
-    surfaceRow = Math.max(3, Math.round(rows * 0.09));
-    gravelRow = rows - Math.max(4, Math.round(rows * 0.13));
+    surfaceRow = -1;
+    gravelRow = rows;
     surfaceY = surfaceRow * ch;
     gravelY = gravelRow * ch;
-    D0 = -Math.min(W, H) * 0.45;
-    D1 = Math.min(W, H) * 0.08;
+    // In mm when known, so the depth looks the same on every monitor.
+    const deep = pxmm ? DEPTH_MM * pxmm : Math.min(W, H);
+    D0 = -deep * 0.45;
+    D1 = deep * 0.08;
     dotChar = new Array(cols * rows);
     for (let i = 0; i < dotChar.length; i++) dotChar[i] = Math.random() < 0.12 ? ".`'"[(Math.random() * 3) | 0] : "";
     if (!fish.length) {
@@ -110,15 +118,11 @@ Wallpaper.scene("tank", (api) => {
   }
 
   function paintBackdrop(g, w, h) {
-    const water = g.createLinearGradient(0, surfaceY, 0, gravelY);
+    const water = g.createLinearGradient(0, 0, 0, h);
     water.addColorStop(0, rgb(sky.top));
     water.addColorStop(1, rgb(sky.bottom));
-    g.fillStyle = rgb(mix(sky.top, [0, 0, 0], 0.55));
-    g.fillRect(0, 0, w, surfaceY);
     g.fillStyle = water;
-    g.fillRect(0, surfaceY, w, gravelY - surfaceY);
-    g.fillStyle = rgb(mix(sky.bottom, [0, 0, 0], 0.35));
-    g.fillRect(0, gravelY, w, h - gravelY);
+    g.fillRect(0, 0, w, h);
     // The lamp (or the night light) shining down from above the middle of the tank.
     const glow = g.createRadialGradient(w * 0.5, surfaceY, 0, w * 0.5, surfaceY, h * 0.8);
     const lamp = sky.lamp > 0.5 ? "255,250,220" : "150,190,255";
@@ -138,7 +142,9 @@ Wallpaper.scene("tank", (api) => {
   const fish = [];
   let nextId = 1;
 
-  const fishSize = (scale) => clamp(Math.min(W, H) * 0.22, 80, 260) * scale;
+  /** About what min(W, H) * 0.22 gives on a 24" 1080p monitor; the tank's depth likewise. */
+  const FISH_MM = 66, DEPTH_MM = 300;
+  const fishSize = (scale) => (pxmm ? FISH_MM * pxmm : clamp(Math.min(W, H) * 0.22, 80, 260)) * scale;
 
   /** Body shape per variety: depth (back to belly) and width, as fractions of length. */
   const BUILD = {
@@ -180,19 +186,33 @@ Wallpaper.scene("tank", (api) => {
   function keepInView() {
     let showing = 0;
     for (const f of fish) {
-      if (f.away || f.leaving) continue;
-      const [sx] = screenOf(f.chain.p[NODES >> 1]);
-      if (f.home == null && (sx < 0 || sx > W)) f.leaving = sx < 0 ? -1 : 1;
-      else showing++;
+      if (f.away || f.leaving || f.crossing) continue;
+      const [sx, sy] = screenOf(f.chain.p[NODES >> 1]);
+      const side = sx < 0 ? "l" : sx > W ? "r" : null;
+      // An edge with a door to the next monitor is a wall, unless the fish goes through.
+      if (f.home == null && side && link.edge(f, side, sy) === null) {
+        f.leaving = side === "l" ? -1 : 1;
+        // Linked, one swims in for it straight away; the host only evens out the group.
+        if (linked()) bringIn();
+      } else showing++;
     }
-    if (showing >= FISH) return;
+    if (showing >= FISH || linked()) return;
     const waiting = fish.filter((f) => f.away);
     if (waiting.length) enter(waiting[Math.floor(rand(0, waiting.length))]);
   }
 
+  const linked = () => links.share !== null && links.doors.length > 0;
+
+  /** A side with no door, to come in or go out by; else either. */
+  function outerSide() {
+    const free = ["l", "r"].filter((side) => !links.doors.some((d) => d.side === side));
+    const pick = free.length ? free : ["l", "r"];
+    return pick[Math.floor(rand(0, pick.length))];
+  }
+
   /** Bring a waiting fish in, head just past one side, at a random height and depth. */
-  function enter(f) {
-    const fromLeft = rand() < 0.5;
+  function enter(f, side = rand() < 0.5 ? "l" : "r") {
+    const fromLeft = side === "l";
     const d = rand(D0 * 0.7, D1 * 0.5), s = solid.scaleAt(d);
     const sx = fromLeft ? -f.L * 0.05 : W + f.L * 0.05, sy = rand(surfaceY + H * 0.15, gravelY - H * 0.15);
     f.pos = [solid.cx + (sx - solid.cx) / s, solid.cy + (sy - solid.cy) / s, d];
@@ -207,7 +227,89 @@ Wallpaper.scene("tank", (api) => {
     f.home = rand(W * 0.2, W * 0.8);
     f.away = false;
     f.leaving = 0;
+    f.crossing = null;
     f.chain.place(f.pos, f.f);
+  }
+
+  /** The host's count is off: n fish swim in from outside (n < 0: -n swim off). */
+  /** One swims in from outside, by a side with no door if there is one. */
+  function bringIn() {
+    const f = fish.find((o) => o.away) || spawnFish(VARIETIES[Math.floor(rand(0, VARIETIES.length))]);
+    enter(f, outerSide());
+  }
+
+  function populate(n) {
+    for (let i = 0; i < n; i++) bringIn();
+    const going = fish.filter(settled);
+    for (let i = 0; i < -n && going.length; i++) {
+      // Not the one on its way to a door, if there is another.
+      const pick = going.length > 1 ? going.filter((f) => !link.pull(f)) : going;
+      const f = pick[Math.floor(rand(0, pick.length))];
+      f.leaving = outerSide() === "l" ? -1 : 1;
+      going.splice(going.indexOf(f), 1);
+    }
+    link.end();
+  }
+
+  // Doors to the next monitors (core/crossing.js). Positions and the body go over in body
+  // lengths, so the fish keeps its shape whatever the neighbour's px per mm.
+  const KEPT = ["variety", "scale", "seed", "cruise", "phase", "fin", "yaw", "yawGoal", "pitch", "bank", "turnLag", "gulp"];
+  const counted = (f) => !f.away && !f.leaving;
+  const settled = (f) => counted(f) && !f.crossing && f.home == null;
+  const link = Wallpaper.crossing(api, {
+    animals: () => fish,
+    kindOf: () => "fish",
+    counted,
+    settled,
+    head: (f) => screenOf(f.pos),
+    dir: (f) => [f.f[0], f.f[1]],
+    outline: (f) => f.chain.p.map(screenOf),
+    reach: (f) => f.L * (0.25 + f.b.tail * 0.6),
+    pack(f) {
+      const data = { speed: f.speed / f.L, d: f.pos[2] / f.L, f: f.f, l: f.l, u: f.u, chain: [] };
+      for (const key of KEPT) data[key] = f[key];
+      for (const p of f.chain.p) data.chain.push(...[0, 1, 2].map((k) => (p[k] - f.pos[k]) / f.L));
+      return data;
+    },
+    unpack(data, side, x, y, mirrored) {
+      const vec = (v) => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+      if (!BUILD[data.variety] || !vec(data.f) || !vec(data.l) || !vec(data.u) || !Array.isArray(data.chain) || data.chain.length !== NODES * 3) return null;
+      const f = spawnFish(data.variety);
+      for (const key of KEPT) if (key !== "variety" && Number.isFinite(data[key])) f[key] = data[key];
+      f.scale = clamp(f.scale, 0.5, 1.5);
+      f.L = fishSize(f.scale);
+      f.chain.seg = f.L / (NODES - 1);
+      f.speed = clamp(+data.speed || f.cruise, 0.05, 1.5) * f.L;
+      // Sent back: flip it in the edge, so it heads back into the tank.
+      const flip = mirrored ? -1 : 1;
+      f.f = [data.f[0] * flip, data.f[1], data.f[2]];
+      f.l = [data.l[0] * flip, data.l[1], data.l[2]];
+      f.u = [data.u[0] * flip, data.u[1], data.u[2]];
+      // The head is where the host says on screen; the depth goes in lengths.
+      const d = clamp(+data.d || 0, -20, 10) * f.L, s = solid.scaleAt(d);
+      f.pos = [solid.cx + (x - solid.cx) / s, solid.cy + (y - solid.cy) / s, d];
+      for (let i = 0; i < NODES; i++) {
+        const o = data.chain.slice(i * 3, i * 3 + 3);
+        f.chain.p[i] = [f.pos[0] + o[0] * f.L * flip, f.pos[1] + o[1] * f.L, f.pos[2] + o[2] * f.L];
+      }
+      f.state = "cruise";
+      f.timer = rand(8, 20);
+      return f;
+    },
+  });
+
+  /**
+   * Mid-crossing: straight on at an even speed, turning alike on both monitors, depth kept.
+   * Not kept under the surface, which is at each monitor's own top (and just off it).
+   */
+  function crossFish(f, dt) {
+    const [ox, oy] = link.heading(f);
+    steer(f, [ox, oy, 0], 0.6, 0, dt);
+    f.phase += dt * (2 + (f.speed / f.L) * 10);
+    f.fin += dt * (sky.lamp < 0.5 ? 1.5 : 4);
+    f.gulp = Math.max(0, f.gulp - dt);
+    f.pos = add(f.pos, f.f, f.speed * dt);
+    f.chain.follow(f.pos);
   }
 
   /** Turn toward `want` (easing in), wander about "up", bank a little and stay upright. */
@@ -247,6 +349,15 @@ Wallpaper.scene("tank", (api) => {
       return;
     }
     if (f.leaving) want[0] += f.leaving * 3;
+    // Doors are walls unless the fish may go through (an edge with no door isn't: the tank
+    // runs on past it).
+    const m = L * 0.9;
+    if (!f.leaving) {
+      if (sx < m && link.edge(f, "l", sy, L * 0.15) === "shut") want[0] += ((m - sx) / m) * 2.5;
+      if (sx > W - m && link.edge(f, "r", sy, L * 0.15) === "shut") want[0] -= ((sx - (W - m)) / m) * 2.5;
+    }
+    const sent = link.pull(f);
+    if (sent) want[0] += Math.sign(sent[0] - sx) * 1.6;
     if (f.home != null) {
       want[0] += Math.sign(f.home - f.pos[0]) * 3;
       // In once its middle is (see keepInView).
@@ -300,7 +411,6 @@ Wallpaper.scene("tank", (api) => {
       if (bestD < L * (best.float > 0 ? 0.55 : 0.3)) {
         flakes.splice(flakes.indexOf(best), 1);
         f.gulp = 0.5;
-        if (best.y < surfaceY + 8) addRipple(best.x);
       }
     } else if (f.state === "feed") {
       f.state = "cruise";
@@ -616,14 +726,12 @@ Wallpaper.scene("tank", (api) => {
   const flakes = [];
   const bubbles = [];
   const puffs = [];
-  const ripples = [];
   let stone = { x: 0 };
 
   function sprinkle(x) {
     for (let i = 0; i < 9; i++) {
       flakes.push({ x: x + rand(-50, 50), y: surfaceY + rand(0, 6), d: rand(D0 * 0.4, D1 * 0.6), float: rand(1.5, 5), vy: rand(10, 22), seed: rand(0, 100), c: [[240, 170, 60], [220, 90, 60], [190, 200, 90]][i % 3], life: 60 });
     }
-    addRipple(x);
   }
 
   function stepFlakes(dt, t) {
@@ -658,10 +766,7 @@ Wallpaper.scene("tank", (api) => {
       b.y -= (70 + b.r * 60) * dt;
       b.x += Math.sin(t * 4 + b.ph) * dt * 18;
       b.r = Math.min(1, b.r + dt * 0.08);
-      if (b.y <= surfaceY + ch) {
-        bubbles.splice(i, 1);
-        addRipple(b.x, 0.4);
-      }
+      if (b.y <= surfaceY + ch) bubbles.splice(i, 1);
     }
   }
 
@@ -689,31 +794,9 @@ Wallpaper.scene("tank", (api) => {
     }
   }
 
-  function addRipple(x, strength = 1) {
-    ripples.push({ x, r: 0, s: strength });
-  }
-
-  /** The waterline seen from just below: a bright wavy band, rippled by gulps and bubbles. */
-  function drawSurface(t, dt) {
-    for (let i = ripples.length - 1; i >= 0; i--) {
-      if ((ripples[i].r += dt * 120) > 260) ripples.splice(i, 1);
-    }
-    const c3 = mix([140, 170, 220], [235, 250, 245], sky.lamp);
-    for (let c = 0; c < cols; c++) {
-      const x = (c + 0.5) * cw;
-      let h = Math.sin(x * 0.035 + t * 1.1) * 0.5 + Math.sin(x * 0.013 - t * 0.6) * 0.5;
-      for (const rp of ripples) {
-        const dd = Math.abs(Math.abs(x - rp.x) - rp.r);
-        if (dd < 14) h += (1 - dd / 14) * rp.s * (1 - rp.r / 260) * 2;
-      }
-      put(c, surfaceRow, h > 0.7 ? "^" : h < -0.5 ? "_" : "~", style(c3[0], c3[1], c3[2], 0.8));
-      if (h > 0.3) put(c, surfaceRow + 1, "~", style(c3[0], c3[1], c3[2], 0.2));
-    }
-  }
-
   /** Lamp light rippling through the water: drifting dots, brightest just under the surface. */
   function drawCaustics(t) {
-    for (let r = surfaceRow + 2 + (frameNo % 2); r < gravelRow; r += 2) {
+    for (let r = frameNo % 2; r < rows; r += 2) {
       const y = (r + 0.5) * ch, depth = (y - surfaceY) / Math.max(1, gravelY - surfaceY);
       for (let c = 0; c < cols; c++) {
         const g = dotChar[r * cols + c];
@@ -726,25 +809,8 @@ Wallpaper.scene("tank", (api) => {
     }
   }
 
-  const PEBBLES = [[220, 210, 190], [180, 140, 100], [130, 110, 90], [230, 120, 90], [120, 150, 190], [240, 240, 236], [90, 80, 74]];
-
-  function drawGravel(t) {
-    const lamp = lerp(0.45, 1, sky.lamp);
-    for (let r = gravelRow; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const n = hash2(c, r, 13);
-        const edge = r === gravelRow;
-        if (edge && Math.sin(c * 0.21) + hash2(c, 1, 3) * 0.8 < -0.4) continue;
-        const p = PEBBLES[Math.floor(hash2(c, r, 29) * PEBBLES.length)];
-        const g = n > 0.85 ? "o" : n > 0.55 ? "." : n > 0.3 ? ":" : n > 0.15 ? "," : " ";
-        if (g === " ") continue;
-        const x = (c + 0.5) * cw, y = (r + 0.5) * ch;
-        const k = Math.max(0, Math.sin(x * 0.03 + t * 0.7) * Math.sin(y * 0.05 - t * 0.5 + x * 0.01));
-        const lit = lamp * (0.6 + 0.5 * k * k) * (1 - (r - gravelRow) / (rows - gravelRow) * 0.4);
-        put(c, r, g, style(p[0] * lit, p[1] * lit, p[2] * lit, 0.6));
-      }
-    }
-    // The air stone.
+  /** The air stone, sitting on the gravel at the bottom edge. */
+  function drawStone() {
     put(Math.floor(stone.x / cw), gravelRow - 1, "@", style(150, 150, 160, 1));
   }
 
@@ -794,8 +860,16 @@ Wallpaper.scene("tank", (api) => {
       grid.repaintBackdrop();
       skyPainted = now;
     }
+    link.begin();
     keepInView();
-    for (const f of fish) if (!f.away) stepFish(f, dt, t);
+    for (const f of fish) {
+      if (f.away) continue;
+      if (f.crossing) crossFish(f, dt);
+      else stepFish(f, dt, t);
+      if (link.update(f, dt)) f.gone = true;
+    }
+    for (let i = fish.length - 1; i >= 0; i--) if (fish[i].gone) fish.splice(i, 1);
+    link.end();
     stepFlakes(dt, t);
     stepBubbles(dt, t);
   }
@@ -806,7 +880,7 @@ Wallpaper.scene("tank", (api) => {
     drawPlants(t, false);
     drawBubbles();
     drawFlakes();
-    drawGravel(t);
+    drawStone();
     drawPuffs(dt);
 
     solid.begin();
@@ -814,7 +888,6 @@ Wallpaper.scene("tank", (api) => {
     solid.resolve();
 
     drawPlants(t, true);
-    drawSurface(t, dt);
   }
 
   function click(x, y) {
@@ -823,5 +896,11 @@ Wallpaper.scene("tank", (api) => {
 
   setSky(currentHour(performance.now()));
 
-  return { resize, paintBackdrop, step, draw, click, chat: false };
+  return {
+    resize, paintBackdrop, step, draw, click, populate,
+    arrive: link.arrive,
+    linkSides: () => "lr",
+    population: () => ({ fish: FISH }),
+    chat: false,
+  };
 });

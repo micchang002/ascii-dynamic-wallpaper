@@ -5,14 +5,22 @@
  * simulation can be drawn two ways:
  *   top   a sunlit lagoon from above: sand ripples and caustics on the floor, shadows that
  *         drift with depth, and at night the plankton glows wherever something moves;
- *   side  the open water from a little below: the surface and sky along the top, light
- *         shafts, marine snow and kelp, the white bellies of the mantas overhead.
+ *   side  the open water from a little below, filling the screen (the surface and seabed
+ *         lie just past its edges): light shafts, marine snow and kelp, the white bellies
+ *         of the mantas overhead.
  * Mantas are a flapping disc (a wave runs out along each wing) that banks into turns and
  * somersaults when it feeds; whales are a tube around a spine that beats up and down, with
  * long white pectoral fins and a fluke that pitches with the stroke. Whales come up to
  * blow now and then. A school of small fish keeps clear of everything bigger. The sea runs
  * on past the screen's edges; when a manta or whale swims off one, another swims in, so the
  * numbers in view stay the same (the school stays on screen).
+ *
+ * Across monitors: with ?pxmm= the animals keep the same size on each, and ?eye= gives them one
+ * perspective (see core/app.js). Monitors with the same view and species share one sea: a manta
+ * or whale (a mother with her calf at her side) that swims into a door carries on in the next
+ * (core/crossing.js), any side from above, left and right from the side. The host keeps count
+ * of each kind, so on an edge with no door they swim off and in only when the group is short
+ * or over.
  *
  * Click to release a plankton bloom: the mantas come and loop through it. Mantas drift
  * toward a resting cursor; the school scatters from a moving one.
@@ -25,7 +33,7 @@
 Wallpaper.scene("ocean", (api) => {
   "use strict";
 
-  const { grid, params, intParam, floatParam, pointer, setTheme } = api;
+  const { grid, params, intParam, floatParam, pointer, setTheme, pxmm, eye, links } = api;
   const { clamp, lerp, smoothstep, rand, hash2, noise2 } = Wallpaper.math;
   const style = Wallpaper.style;
   const { Solid, Chain, dot, cross, len, norm, add, rotate, turnToward } = Wallpaper.solid;
@@ -45,20 +53,20 @@ Wallpaper.scene("ocean", (api) => {
 
   /**
    * The water through the day: [hour, shallow, deep, floor dots, glow (wakes, plankton),
-   * sky (side view), light on the animals].
+   * light on the animals].
    */
   const SKY = [
-    [0, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], [6, 10, 24], 1],
-    [5, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], [6, 10, 24], 1],
-    [6.5, [70, 84, 130], [14, 24, 56], [190, 150, 190], [200, 220, 255], [230, 150, 140], 0.8],
-    [8, [76, 186, 200], [14, 92, 132], [210, 250, 245], [235, 255, 255], [176, 216, 236], 1],
-    [16, [76, 186, 200], [14, 92, 132], [210, 250, 245], [235, 255, 255], [176, 216, 236], 1],
-    [18.3, [130, 120, 140], [20, 46, 84], [255, 200, 160], [255, 230, 200], [246, 160, 110], 0.85],
-    [20, [16, 46, 80], [3, 12, 28], [60, 110, 150], [120, 230, 230], [20, 22, 48], 0.9],
-    [21.5, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], [6, 10, 24], 1],
-    [24, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], [6, 10, 24], 1],
+    [0, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], 1],
+    [5, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], 1],
+    [6.5, [70, 84, 130], [14, 24, 56], [190, 150, 190], [200, 220, 255], 0.8],
+    [8, [76, 186, 200], [14, 92, 132], [210, 250, 245], [235, 255, 255], 1],
+    [16, [76, 186, 200], [14, 92, 132], [210, 250, 245], [235, 255, 255], 1],
+    [18.3, [130, 120, 140], [20, 46, 84], [255, 200, 160], [255, 230, 200], 0.85],
+    [20, [16, 46, 80], [3, 12, 28], [60, 110, 150], [120, 230, 230], 0.9],
+    [21.5, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], 1],
+    [24, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], 1],
   ];
-  const sky = { hour: -1, shallow: [0, 0, 0], deep: [0, 0, 0], dot: [0, 0, 0], glow: [0, 0, 0], air: [0, 0, 0], light: 1, day: 1 };
+  const sky = { hour: -1, shallow: [0, 0, 0], deep: [0, 0, 0], dot: [0, 0, 0], glow: [0, 0, 0], light: 1, day: 1 };
   const startTime = performance.now();
   let skyPainted = 0;
 
@@ -81,8 +89,7 @@ Wallpaper.scene("ocean", (api) => {
     mixInto(sky.deep, 2);
     mixInto(sky.dot, 3);
     mixInto(sky.glow, 4);
-    mixInto(sky.air, 5);
-    sky.light = lerp(a[6], b[6], t);
+    sky.light = lerp(a[5], b[5], t);
     sky.day = clamp((0.3 * sky.shallow[0] + 0.59 * sky.shallow[1] + 0.11 * sky.shallow[2] - 40) / 110, 0, 1);
     sky.hour = hour;
     setTheme(hour >= 8.5 && hour < 18 ? "light" : "dark");
@@ -95,10 +102,10 @@ Wallpaper.scene("ocean", (api) => {
 
   let W = 0, H = 0, cw = 10, ch = 15, cols = 0, rows = 0;
   let glyph = [], color = [];
-  const solid = new Solid(grid);
+  const solid = new Solid(grid, eye);
   const put = (c, r, g, st) => grid.put(c, r, g, st);
 
-  /** Side view: the waterline row, the seabed row. */
+  /** Side view: the waterline row and the seabed row, just off the screen. */
   let surfaceRow = 0, bedRow = 0, surfaceY = 0, bedY = 0;
   /** "Up" for the animals, in screen space: out of the screen from above, up the screen
    * (tilted, as if looking up from a little below) from the side. */
@@ -130,25 +137,28 @@ Wallpaper.scene("ocean", (api) => {
   function setView(name, force) {
     if (name === view && !force) return;
     view = name;
-    api.links.rekey();
-    surfaceRow = Math.max(3, Math.round(rows * 0.13));
-    bedRow = rows - Math.max(2, Math.round(rows * 0.05));
+    surfaceRow = -1;
+    bedRow = rows;
     surfaceY = surfaceRow * ch;
     bedY = bedRow * ch;
     if (view === "top") {
       UP = [0, 0, 1];
       LIGHT = norm([-0.35, -0.45, 0.82]);
       FILL = [0, 0, 0];
-      D0 = -Math.min(W, H) * 0.45;
-      D1 = -Math.min(W, H) * 0.03;
+      // In mm when known, so the depth looks the same on every monitor.
+      const deep = pxmm ? DEEP_MM * pxmm : Math.min(W, H);
+      D0 = -deep * 0.45;
+      D1 = -deep * 0.03;
     } else {
       UP = norm([0, -1, -0.36]);
       LIGHT = norm([-0.2, -0.85, 0.5]);
       FILL = norm([0.2, 0.6, 0.8]);
-      D0 = -W * 0.7;
-      D1 = W * 0.1;
+      const far = pxmm ? FAR_MM * pxmm : W;
+      D0 = -far * 0.7;
+      D1 = far * 0.1;
     }
     spawnAll();
+    api.links.rekey();
     grid.repaintBackdrop();
   }
 
@@ -162,20 +172,15 @@ Wallpaper.scene("ocean", (api) => {
       g.fillRect(0, 0, w, h);
       return;
     }
-    const air = g.createLinearGradient(0, 0, 0, surfaceY);
-    air.addColorStop(0, rgb(mix(sky.air, [0, 0, 0], 0.25)));
-    air.addColorStop(1, rgb(sky.air));
-    g.fillStyle = air;
-    g.fillRect(0, 0, w, surfaceY);
-    const water = g.createLinearGradient(0, surfaceY, 0, h);
+    const water = g.createLinearGradient(0, 0, 0, h);
     water.addColorStop(0, rgb(mix(sky.shallow, [255, 255, 255], 0.12)));
     water.addColorStop(0.45, rgb(mix(sky.shallow, sky.deep, 0.55)));
     water.addColorStop(1, rgb(sky.deep));
     g.fillStyle = water;
-    g.fillRect(0, surfaceY, w, h - surfaceY);
+    g.fillRect(0, 0, w, h);
     // Sun or moon glow through the surface.
     const sx = w * (0.15 + 0.7 * clamp((sky.hour - 6) / 12, 0, 1)), sr = h * 0.45;
-    const glow = g.createRadialGradient(sx, surfaceY, 0, sx, surfaceY, sr);
+    const glow = g.createRadialGradient(sx, 0, 0, sx, 0, sr);
     glow.addColorStop(0, `rgba(210,232,255,${0.25 + 0.12 * sky.day})`);
     glow.addColorStop(1, "rgba(255,250,230,0)");
     g.fillStyle = glow;
@@ -222,8 +227,11 @@ Wallpaper.scene("ocean", (api) => {
   const animals = [];
   let nextId = 1;
 
-  const mantaSize = () => clamp(Math.min(W, H) * 0.2, 90, 260);
-  const whaleSize = () => clamp(Math.min(W, H) * 0.78, 300, 900);
+  /** In mm, about what the px sizes give on a 24" 1080p monitor; likewise the depth ranges. */
+  const MANTA_MM = 60, WHALE_MM = 234, DEEP_MM = 300, FAR_MM = 530;
+  const mantaSize = () => (pxmm ? MANTA_MM * pxmm : clamp(Math.min(W, H) * 0.2, 90, 260));
+  const whaleSize = () => (pxmm ? WHALE_MM * pxmm : clamp(Math.min(W, H) * 0.78, 300, 900));
+  const sizeOf = (kind) => (kind === "manta" ? mantaSize() : whaleSize());
 
   /** A random point to start at: on screen, inside the depth range. */
   function startPos(L) {
@@ -301,17 +309,27 @@ Wallpaper.scene("ocean", (api) => {
   function keepInView() {
     const showing = { manta: 0, whale: 0 };
     for (const a of animals) {
-      if (a.away || a.leaving || a.mother) continue;
+      if (a.away || a.leaving || a.mother || a.crossing) continue;
       // A mother turns as her head nears an edge: a whale turns too slowly to wait longer.
       const mother = animals.some((c) => c.mother === a);
       const [sx, sy] = screenOf(mother ? a.pos : middleOf(a));
-      if (!a.home && !onScreen(sx, sy, mother ? a.L * 0.35 : 0)) {
+      const inset = mother ? a.L * 0.35 : 0;
+      const side = sx < inset ? "l" : sx > W - inset ? "r" : view === "side" ? null : sy < inset ? "t" : sy > H - inset ? "b" : null;
+      // An edge with a door to the next monitor: through it if open, else it's a wall (stepAnimal).
+      const door = side && link.edge(a, side, side === "l" || side === "r" ? sy : sx, a.L * 0.15);
+      if (door) showing[a.kind]++;
+      else if (!a.home && !onScreen(sx, sy, inset)) {
         if (mother) {
           a.home = [rand(W * 0.2, W * 0.8), view === "side" ? rand(surfaceY + H * 0.2, bedY - H * 0.15) : rand(H * 0.2, H * 0.8)];
           showing[a.kind]++;
-        } else a.leaving = [sx < 0 ? -1 : sx > W ? 1 : 0, view === "top" ? (sy < 0 ? -1 : sy > H ? 1 : 0) : 0];
+        } else {
+          a.leaving = [sx < 0 ? -1 : sx > W ? 1 : 0, view === "top" ? (sy < 0 ? -1 : sy > H ? 1 : 0) : 0];
+          // Linked, one swims in for it straight away; the host only evens out the group.
+          if (linked()) bringIn(a.kind);
+        }
       } else showing[a.kind]++;
     }
+    if (linked()) return;
     for (const kind of ["manta", "whale"]) {
       if (showing[kind] >= wanted[kind]) continue;
       const waiting = animals.filter((a) => a.away && a.kind === kind && !a.mother);
@@ -323,10 +341,10 @@ Wallpaper.scene("ocean", (api) => {
    * Bring a waiting animal in from just past an edge (any edge from above), heading in: a
    * manta just out of sight, a whale with its head at the edge (its body trails behind).
    */
-  function enter(a) {
+  function enter(a, side = null) {
     const L = a.L, d = rand(D0 * 0.7, D1 * 0.5), s = solid.scaleAt(d);
     const y0 = view === "side" ? surfaceY + L * 0.4 : L * 0.4;
-    const edge = view === "top" ? Math.floor(rand(0, 4)) : rand() < 0.5 ? 0 : 1;
+    const edge = side ? "lrtb".indexOf(side) : view === "top" ? Math.floor(rand(0, 4)) : rand() < 0.5 ? 0 : 1;
     const o = a.chain ? L * 0.05 : L * 0.6;
     const sx = edge === 0 ? -o : edge === 1 ? W + o : rand(L * 0.6, W - L * 0.6);
     const sy = edge === 2 ? -o : edge === 3 ? H + o : rand(y0, H - L * 0.4);
@@ -342,7 +360,123 @@ Wallpaper.scene("ocean", (api) => {
     a.loops = 0;
     a.away = false;
     a.leaving = null;
+    a.crossing = null;
     if (a.chain) a.chain.place(a.pos, a.f);
+    // A calf comes back with its mother.
+    for (const c of animals) {
+      if (c.mother !== a) continue;
+      c.pos = add(a.pos, a.l, a.L * 0.25);
+      c.f = a.f.slice();
+      c.l = a.l.slice();
+      c.u = a.u.slice();
+      c.away = false;
+      c.crossing = null;
+      c.chain.place(c.pos, c.f);
+    }
+  }
+
+  const linked = () => links.share !== null && links.doors.length > 0;
+
+  /** A side with no door, to come in or go out by; else any. */
+  function outerSide() {
+    const all = view === "top" ? ["l", "r", "t", "b"] : ["l", "r"];
+    const free = all.filter((side) => !links.doors.some((d) => d.side === side));
+    const pick = free.length ? free : all;
+    return pick[Math.floor(rand(0, pick.length))];
+  }
+
+  /** One of a kind swims in from outside, by a side with no door if there is one. */
+  function bringIn(kind) {
+    const a = animals.find((o) => o.away && o.kind === kind && !o.mother) || makeAnimal(kind, sizeOf(kind) * rand(0.85, 1.1), { away: true });
+    enter(a, outerSide());
+  }
+
+  /** The host's count is off: n of a kind swim in from outside (n < 0: -n swim off). */
+  function populate(n, kind) {
+    if (kind !== "manta" && kind !== "whale") return;
+    for (let i = 0; i < n; i++) bringIn(kind);
+    // Rather not a mother (her calf would have to go too), nor the one on its way to a door.
+    const going = animals.filter((a) => a.kind === kind && settled(a));
+    const rank = (a) => (animals.some((c) => c.mother === a) ? 2 : 0) + (link.pull(a) ? 1 : 0);
+    going.sort((a, b) => rank(a) - rank(b));
+    for (const a of going.slice(0, Math.max(0, -n))) a.leaving = link.OUT[outerSide()].slice();
+    link.end();
+  }
+
+  // Doors to the next monitors (core/crossing.js). What crosses goes over in body lengths, so
+  // it keeps its shape whatever the neighbour's px per mm; a calf goes along with its mother.
+  const KEPT = ["seed", "cruise", "phase", "yaw", "yawGoal", "yawTimer", "pitchGoal", "bank", "timer"];
+  const counted = (a) => !a.away && !a.leaving && !a.mother;
+  const settled = (a) => counted(a) && !a.crossing && !a.home && a.state === "cruise";
+  const calfOf = (a) => animals.find((c) => c.mother === a && !c.away);
+  const isVec = (v) => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+
+  function packBody(a, origin, unit) {
+    const data = { size: a.L / unit, speed: a.speed / a.L, at: [0, 1, 2].map((k) => (a.pos[k] - origin[k]) / unit), f: a.f, l: a.l, u: a.u };
+    for (const key of KEPT) data[key] = a[key];
+    if (a.chain) data.chain = a.chain.p.flatMap((p) => [0, 1, 2].map((k) => (p[k] - a.pos[k]) / a.L));
+    return data;
+  }
+
+  /** A body from packBody, at `origin` + its offset; `mirror` flips vectors in the edge. */
+  function unpackBody(data, kind, origin, unit, mirror, extra) {
+    if (!data || !isVec(data.f) || !isVec(data.u) || !isVec(data.at)) return null;
+    if (kind === "whale" && !(Array.isArray(data.chain) && data.chain.length === 48 && data.chain.every(Number.isFinite))) return null;
+    const L = clamp(+data.size || 1, 0.3, 1.5) * unit;
+    const a = makeAnimal(kind, L, extra);
+    for (const key of KEPT) if (Number.isFinite(data[key])) a[key] = data[key];
+    a.speed = clamp(+data.speed || a.cruise, 0.02, 1) * L;
+    a.f = norm(mirror(data.f));
+    a.u = norm(mirror(data.u));
+    a.l = cross(a.u, a.f);
+    a.pos = add(origin, mirror(data.at), unit);
+    if (a.chain) {
+      for (let i = 0; i < a.chain.n; i++) a.chain.p[i] = add(a.pos, mirror(data.chain.slice(i * 3, i * 3 + 3)), L);
+    }
+    return a;
+  }
+
+  const link = Wallpaper.crossing(api, {
+    animals: () => animals,
+    kindOf: (a) => a.kind,
+    counted,
+    settled,
+    head: (a) => screenOf(a.pos),
+    dir: (a) => [a.f[0], a.f[1]],
+    // A manta's pos is its mouth, the disc trailing behind; a whale's spine.
+    outline: (a) => (a.chain ? a.chain.p : [0, 0.5, 1].map((u) => add(a.pos, a.f, -u * a.L))).map(screenOf),
+    reach: (a) => a.L * (a.chain ? 0.35 : 1.05),
+    pack(a) {
+      const data = { ...packBody(a, a.pos, sizeOf(a.kind)), d: a.pos[2] / a.L };
+      const calf = calfOf(a);
+      if (calf) data.calf = packBody(calf, a.pos, a.L);
+      return data;
+    },
+    unpack(data, side, x, y, mirrored) {
+      const kind = data.kind;
+      if (kind !== "manta" && kind !== "whale") return null;
+      // Sent back: flip it in the edge, so it heads back in.
+      const flipX = mirrored && (side === "l" || side === "r"), flipY = mirrored && !flipX;
+      const mirror = (v) => [flipX ? -v[0] : v[0], flipY ? -v[1] : v[1], v[2]];
+      const unit = sizeOf(kind);
+      // The head is where the host says on screen; the depth goes in lengths.
+      const d = clamp(+data.d || 0, -30, 10) * clamp(+data.size || 1, 0.3, 1.5) * unit, s = solid.scaleAt(d);
+      const head = [solid.cx + (x - solid.cx) / s, solid.cy + (y - solid.cy) / s, d];
+      const a = unpackBody({ ...data, at: [0, 0, 0] }, kind, head, unit, mirror);
+      if (!a) return null;
+      const calf = kind === "whale" && data.calf ? unpackBody(data.calf, "whale", a.pos, a.L, mirror, { mother: a }) : null;
+      return calf ? [a, calf] : a;
+    },
+    companions: (a) => [calfOf(a)].filter(Boolean),
+  });
+
+  /** Mid-crossing: straight on at an even speed, turning alike on both monitors. */
+  function crossAnimal(a, dt) {
+    const [ox, oy] = link.heading(a);
+    steerFrame(a, [ox, oy, 0], a.kind === "manta" ? 0.6 : 0.22, 0, dt, a.kind === "manta" ? 1.6 : 1);
+    a.phase += dt * (a.kind === "manta" ? 1.6 + (a.speed / a.L) * 2.2 : 0.7 + (a.speed / a.L) * 6);
+    a.pos = add(a.pos, a.f, a.speed * dt);
+    if (a.chain) a.chain.follow(a.pos);
   }
 
   /**
@@ -396,11 +530,26 @@ Wallpaper.scene("ocean", (api) => {
     const m = a.kind === "whale" ? L * 0.15 : L * 0.7;
     const out = L * 1.2;
     const gone = sx < -out || sx > W + out || (view === "top" && (sy < -out || sy > H + out));
-    if (gone && !a.home && !a.mother) {
+    if ((gone && !a.home && !a.mother) || (a.mother && a.mother.away)) {
       a.away = true;
       return;
     }
     if (a.leaving) want = add(want, [a.leaving[0], a.leaving[1], 0], 3);
+    // A door it can't go through now is a wall (an edge with no door isn't: the sea runs on).
+    if (!a.leaving && !a.mother) {
+      const wall = a.kind === "whale" ? L * 0.5 : L * 0.7;
+      for (const side of view === "top" ? "lrtb" : "lr") {
+        const inside = -link.past(side, sx, sy);
+        if (inside >= wall || link.edge(a, side, side === "l" || side === "r" ? sy : sx, L * 0.15) !== "shut") continue;
+        const [ox, oy] = link.OUT[side];
+        want = add(want, [-ox, -oy, 0], ((wall - Math.max(0, inside)) / wall) * 3);
+      }
+    }
+    const sent = link.pull(a);
+    if (sent) {
+      const dx = sent[0] - sx, dy = sent[1] - sy, d = Math.hypot(dx, dy) || 1;
+      want = add(want, [dx / d, dy / d, 0], 1.6);
+    }
     if (a.home) {
       want = add(want, norm([a.home[0] - a.pos[0], a.home[1] - a.pos[1], 0]), 3);
       // In once its middle is (see keepInView).
@@ -1065,24 +1214,8 @@ Wallpaper.scene("ocean", (api) => {
     }
   }
 
-  /** The waterline seen from just below, the seabed, swaying kelp. */
-  function drawSurfaceAndBed(t) {
-    const foam = mix(sky.air, [255, 255, 255], 0.5);
-    for (let c = 0; c < cols; c++) {
-      const x = c * cw;
-      const h = Math.sin(x * 0.03 + t * 1.2) + Math.sin(x * 0.011 - t * 0.7);
-      put(c, surfaceRow, h > 0.6 ? "^" : h < -0.6 ? "_" : "~", style(foam[0], foam[1], foam[2], 0.75));
-      if (Math.sin(x * 0.05 - t * 0.9) > 0.85) put(c, surfaceRow + 1, "~", style(foam[0], foam[1], foam[2], 0.25));
-    }
-    const sand = mix([60, 70, 80], [196, 186, 150], sky.day * 0.7 + 0.2);
-    for (let r = bedRow; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const n = hash2(c, r, 41);
-        const g = r === bedRow ? (Math.sin(c * 0.35) > 0.3 ? "_" : "~") : n > 0.55 ? "." : n > 0.4 ? "," : "";
-        if (g) put(c, r, g, style(sand[0], sand[1], sand[2], r === bedRow ? 0.7 : 0.45));
-      }
-    }
-    // Kelp: a few strands rooted in the bed, swaying with the swell.
+  /** Side view: kelp rooted in the seabed below the screen, swaying with the swell. */
+  function drawKelp(t) {
     const kelp = mix([30, 60, 50], [90, 150, 80], sky.day);
     const strands = Math.max(3, Math.round(cols / 24));
     for (let k = 0; k < strands; k++) {
@@ -1140,8 +1273,8 @@ Wallpaper.scene("ocean", (api) => {
   function setSpecies(name) {
     if (name === species) return;
     species = name;
-    api.links.rekey();
     spawnAll();
+    api.links.rekey();
   }
 
   window.addEventListener("keydown", (e) => {
@@ -1163,8 +1296,16 @@ Wallpaper.scene("ocean", (api) => {
       grid.repaintBackdrop();
       skyPainted = now;
     }
+    link.begin();
     keepInView();
-    for (const a of animals) if (!a.away) stepAnimal(a, dt, t);
+    for (const a of animals) {
+      if (a.away) continue;
+      if (a.crossing) crossAnimal(a, dt);
+      else stepAnimal(a, dt, t);
+      if (link.update(a, dt)) a.gone = true;
+    }
+    for (let i = animals.length - 1; i >= 0; i--) if (animals[i].gone) animals.splice(i, 1);
+    link.end();
     stepFish(dt, t);
     stepSpouts(dt);
     diffuseEnergy();
@@ -1186,7 +1327,7 @@ Wallpaper.scene("ocean", (api) => {
     }
     if (view === "side") {
       drawSnow(dt, t);
-      drawSurfaceAndBed(t);
+      drawKelp(t);
     }
     drawFood(dt, t);
     drawFish();
@@ -1226,5 +1367,12 @@ Wallpaper.scene("ocean", (api) => {
   // Across monitors, only the same view of the same animals line up.
   const linkKey = () => `${view}/${species}`;
 
-  return { resize, paintBackdrop, step, draw, pointerMove, click, linkKey, chat: false };
+  return {
+    resize, paintBackdrop, step, draw, pointerMove, click, linkKey, populate,
+    arrive: link.arrive,
+    // From the side, the surface and the seabed aren't doors.
+    linkSides: () => (view === "top" ? "lrtb" : "lr"),
+    population: () => ({ ...wanted }),
+    chat: false,
+  };
 });

@@ -22,7 +22,7 @@
 Wallpaper.scene("koi", (api) => {
   "use strict";
 
-  const { grid, intParam, floatParam, pointer, setTheme, pxmm, links } = api;
+  const { grid, intParam, floatParam, pointer, setTheme, pxmm } = api;
   const { clamp, lerp, smoothstep, wrapAngle, rand, noise2 } = Wallpaper.math;
   const style = Wallpaper.style;
 
@@ -192,9 +192,8 @@ Wallpaper.scene("koi", (api) => {
       finScale: variety === "butterfly" ? 1.7 : 1,
       px: new Float32Array(NODES),
       py: new Float32Array(NODES),
-      // The side of the screen it is crossing by: leaving (and gone once past) or entering.
-      leaving: null,
-      entering: null,
+      // Set by core/crossing.js while it swims between monitors.
+      crossing: null,
       // 0..1; fade +1 while rising into view, -1 while sinking out (then gone).
       alpha: 1,
       fade: 0,
@@ -217,86 +216,44 @@ Wallpaper.scene("koi", (api) => {
     koi.push(k);
   }
 
-  /** The door koi may leave by on `side` at `along`, at least `margin` from its ends, if any. */
-  function door(side, along, margin) {
-    for (const d of links.doors) {
-      if (d.side === side && along > d.from + margin && along < d.to - margin && mayLeave(d)) return d;
-    }
-    return null;
-  }
-
-  // Koi here, not counting those leaving or sinking; see countKoi().
-  let count = 0;
-
-  /** Only from the fuller pond of the two (against each one's share), so neither drifts far from it. */
-  function mayLeave(d) {
-    if (links.share === null || !Number.isFinite(d.surplus)) return true;
-    return count - links.share >= d.surplus;
-  }
-
-  /** Where a koi sent through door d heads: just past the middle of it. */
-  function doorTarget(d, L) {
-    const mid = (d.from + d.to) / 2;
-    return d.side === "l" ? [-L, mid] : d.side === "r" ? [W + L, mid] : d.side === "t" ? [mid, -L] : [mid, H + L];
-  }
-
-  /** While over its share, the pond sends one koi at a time to the door to the emptiest neighbour. */
-  let migrant = null, migrantDoor = null;
-  function pickMigrant() {
-    migrantDoor = null;
-    if (links.share !== null) {
-      let most = 1;
-      for (const d of links.doors) {
-        const gap = count - links.share - d.surplus;
-        if (Number.isFinite(gap) && gap > most) {
-          most = gap;
-          migrantDoor = d;
-        }
+  // Doors to the next monitors (core/crossing.js); the spine goes over relative to the head, in body lengths.
+  const KEPT = ["variety", "scale", "seed", "depth", "angle", "cruise", "wander", "phase", "finScale"];
+  const cross = Wallpaper.crossing(api, {
+    animals: () => koi,
+    kindOf: () => "koi",
+    counted: (k) => k.fade >= 0,
+    settled: (k) => !k.fade,
+    head: (k) => [k.px[0], k.py[0]],
+    dir: (k) => [Math.cos(k.angle), Math.sin(k.angle)],
+    outline: (k) => Array.from({ length: NODES }, (_, i) => [k.px[i], k.py[i]]),
+    reach: (k) => k.L * 0.3 * k.finScale,
+    pack(k) {
+      const data = { speed: k.speed / k.L, spine: [] };
+      for (const key of KEPT) data[key] = k[key];
+      for (let i = 0; i < NODES; i++) data.spine.push((k.px[i] - k.px[0]) / k.L, (k.py[i] - k.py[0]) / k.L);
+      return data;
+    },
+    unpack(data, side, x, y, mirrored) {
+      if (!VARIETIES.includes(data.variety) || !Array.isArray(data.spine) || data.spine.length !== NODES * 2) return null;
+      const k = makeKoi(data.variety, clamp(+data.scale || 1, 0.5, 1.5));
+      for (const key of KEPT) if (key !== "variety" && key !== "scale" && Number.isFinite(data[key])) k[key] = data[key];
+      k.L = koiLength(k.scale);
+      k.speed = clamp(+data.speed || k.cruise, 0.1, 1) * k.L;
+      // Sent back: flip it in the edge, so it heads back into the pond.
+      const flipX = mirrored && (side === "l" || side === "r"), flipY = mirrored && !flipX;
+      for (let i = 0; i < NODES; i++) {
+        k.px[i] = x + data.spine[i * 2] * k.L * (flipX ? -1 : 1);
+        k.py[i] = y + data.spine[i * 2 + 1] * k.L * (flipY ? -1 : 1);
       }
-    }
-    if (!migrantDoor) {
-      migrant = null;
-      return;
-    }
-    if (migrant && koi.includes(migrant) && settled(migrant)) return;
-    const [tx, ty] = doorTarget(migrantDoor, 0);
-    migrant = null;
-    let best = Infinity;
-    for (const k of koi) {
-      const d = Math.hypot(k.px[0] - tx, k.py[0] - ty);
-      if (settled(k) && d < best) {
-        best = d;
-        migrant = k;
-      }
-    }
-  }
-
-  /** Not crossing, rising or sinking. */
-  const settled = (k) => !k.leaving && !k.entering && !k.fade;
-
-  function countKoi() {
-    count = 0;
-    for (const k of koi) if (!k.leaving && k.fade >= 0) count++;
-    links.count(count);
-  }
-
-  /** How far (x, y) is past the edge on `side`; negative while on screen. */
-  function past(side, x, y) {
-    return side === "l" ? -x : side === "r" ? x - W : side === "t" ? -y : y - H;
-  }
-
-  /** Whether the whole koi, fins and all, is past the edge on `side` (`out`) or clear of it. */
-  function koiPast(k, side, out) {
-    const margin = k.L * 0.3 * k.finScale + cw;
-    for (let i = 0; i < NODES; i++) {
-      const d = past(side, k.px[i], k.py[i]);
-      if (out ? d < margin : d > -margin) return false;
-    }
-    return true;
-  }
+      if (flipX) k.angle = wrapAngle(Math.PI - k.angle);
+      if (flipY) k.angle = -k.angle;
+      koi.push(k);
+      return k;
+    },
+  });
 
   function stepKoi(k, dt) {
-    if (!k.leaving && !k.entering) steerKoi(k, dt);
+    if (!k.crossing) steerKoi(k, dt);
     swimKoi(k, dt);
     if (k.fade) {
       k.alpha = clamp(k.alpha + (k.fade * dt) / FADE_S, 0, 1);
@@ -310,15 +267,15 @@ Wallpaper.scene("koi", (api) => {
   /** The host's count is off: n koi rise from the deep (or -n sink out of sight). */
   function populate(n) {
     for (let i = 0; i < n; i++) spawnKoi(VARIETIES[(Math.random() * VARIETIES.length) | 0], true);
-    const going = koi.filter(settled);
+    const going = koi.filter((k) => !k.fade && !k.crossing);
     for (let i = 0; i < -n && going.length; i++) {
       // Not the one on its way to a door, if there is another.
-      const pick = going.length > 1 ? going.filter((k) => k !== migrant) : going;
+      const pick = going.length > 1 ? going.filter((k) => !cross.pull(k)) : going;
       const k = pick[(Math.random() * pick.length) | 0];
       k.fade = -1;
       going.splice(going.indexOf(k), 1);
     }
-    countKoi();
+    cross.end();
   }
 
   function steerKoi(k, dt) {
@@ -327,20 +284,20 @@ Wallpaper.scene("koi", (api) => {
     let fx = Math.cos(k.angle), fy = Math.sin(k.angle);
     let urgency = 0;
 
-    // Soft walls: turn back well before the edge, unless it is a door wide enough for the body.
-    // A koi rising or sinking stays put: doors are walls to it.
+    // Soft walls: turn back well before the edge, unless it is a door wide enough for the body
+    // (a koi rising or sinking isn't settled, so doors are walls to it).
     const m = L * 0.9, wide = L * 0.15;
-    const open = (side, along) => !k.fade && door(side, along, wide);
+    const open = (side, along) => cross.edge(k, side, along, wide) === "open";
     if (hx < m && !open("l", hy)) fx += ((m - hx) / m) * 2.5;
     if (hx > W - m && !open("r", hy)) fx -= ((hx - (W - m)) / m) * 2.5;
     if (hy < m && !open("t", hx)) fy += ((m - hy) / m) * 2.5;
     if (hy > H - m && !open("b", hx)) fy -= ((hy - (H - m)) / m) * 2.5;
 
-    if (k === migrant && migrantDoor) {
-      const [tx, ty] = doorTarget(migrantDoor, L);
-      const d = Math.hypot(tx - hx, ty - hy) || 1;
-      fx += ((tx - hx) / d) * 1.6;
-      fy += ((ty - hy) / d) * 1.6;
+    const sent = cross.pull(k);
+    if (sent) {
+      const d = Math.hypot(sent[0] - hx, sent[1] - hy) || 1;
+      fx += ((sent[0] - hx) / d) * 1.6;
+      fy += ((sent[1] - hy) / d) * 1.6;
     }
 
     // Keep a little personal space (head vs. the other fish's middle).
@@ -406,9 +363,10 @@ Wallpaper.scene("koi", (api) => {
     const L = k.L;
     // Mid-crossing, both halves turn alike towards straight across, so a koi that came in
     // along the edge doesn't glide down it for minutes.
-    if (k.leaving || k.entering) {
-      const across = ACROSS[k.leaving || OPPOSITE[k.entering]];
-      k.angle = wrapAngle(k.angle + clamp(wrapAngle(across - k.angle), -0.6 * dt, 0.6 * dt));
+    const across = cross.heading(k);
+    if (across) {
+      const a = Math.atan2(across[1], across[0]);
+      k.angle = wrapAngle(k.angle + clamp(wrapAngle(a - k.angle), -0.6 * dt, 0.6 * dt));
     }
     k.phase += dt * (2.2 + (k.speed / L) * 9);
 
@@ -426,56 +384,7 @@ Wallpaper.scene("koi", (api) => {
     addEnergy(k.px[1], k.py[1], 0.05 + (k.speed / L) * 0.12);
     addEnergy(k.px[NODES - 1], k.py[NODES - 1], 0.08);
 
-    if (k.leaving) {
-      if (koiPast(k, k.leaving, true)) k.gone = true;
-    } else if (k.entering) {
-      if (koiPast(k, k.entering, false)) k.entering = null;
-    } else if (!k.fade) {
-      const hx = k.px[0], hy = k.py[0];
-      const side = hx < 0 ? "l" : hx > W ? "r" : hy < 0 ? "t" : hy > H ? "b" : null;
-      if (side && door(side, side === "l" || side === "r" ? hy : hx, 0)) handOff(k, side);
-    }
-  }
-
-  const OPPOSITE = { l: "r", r: "l", t: "b", b: "t" };
-  // The heading straight out through each side.
-  const ACROSS = { l: Math.PI, r: 0, t: -Math.PI / 2, b: Math.PI / 2 };
-  // Each koi's own look and swim, passed on as they are; the spine goes relative to the head, in body lengths.
-  const KEPT = ["variety", "scale", "seed", "depth", "angle", "cruise", "wander", "phase", "finScale"];
-
-  function handOff(k, side) {
-    const data = { speed: k.speed / k.L, spine: [] };
-    for (const key of KEPT) data[key] = k[key];
-    for (let i = 0; i < NODES; i++) data.spine.push((k.px[i] - k.px[0]) / k.L, (k.py[i] - k.py[0]) / k.L);
-    links.send(side, k.px[0], k.py[0], data);
-    k.leaving = side;
-    count--;
-  }
-
-  /** A koi swims in through the edge on `side`, its head at (x, y). */
-  function arrive(side, x, y, data) {
-    if (!data || !VARIETIES.includes(data.variety) || !Array.isArray(data.spine) || data.spine.length !== NODES * 2) return;
-    const k = makeKoi(data.variety, clamp(+data.scale || 1, 0.5, 1.5));
-    for (const key of KEPT) if (key !== "variety" && key !== "scale" && Number.isFinite(data[key])) k[key] = data[key];
-    k.L = koiLength(k.scale);
-    k.speed = clamp(+data.speed || k.cruise, 0.1, 1) * k.L;
-    for (let i = 0; i < NODES; i++) {
-      k.px[i] = x + data.spine[i * 2] * k.L;
-      k.py[i] = y + data.spine[i * 2 + 1] * k.L;
-    }
-    // Sent back through the door it left by: mirror it in that edge, so it turns back into the pond.
-    const inward = { l: [1, 0], r: [-1, 0], t: [0, 1], b: [0, -1] }[side];
-    if (Math.cos(k.angle) * inward[0] + Math.sin(k.angle) * inward[1] < 0) {
-      const horizontal = side === "l" || side === "r", edge = { l: 0, r: W, t: 0, b: H }[side];
-      for (let i = 0; i < NODES; i++) {
-        if (horizontal) k.px[i] = 2 * edge - k.px[i];
-        else k.py[i] = 2 * edge - k.py[i];
-      }
-      k.angle = horizontal ? wrapAngle(Math.PI - k.angle) : -k.angle;
-    }
-    k.entering = side;
-    koi.push(k);
-    countKoi();
+    if (cross.update(k, dt)) k.gone = true;
   }
 
   // Scratch spine for the koi being drawn (with the swimming wave applied).
@@ -878,10 +787,10 @@ Wallpaper.scene("koi", (api) => {
       skyPainted = now;
     }
 
-    pickMigrant();
+    cross.begin();
     for (const k of koi) stepKoi(k, dt);
     for (let i = koi.length - 1; i >= 0; i--) if (koi[i].gone) koi.splice(i, 1);
-    countKoi();
+    cross.end();
     diffuseEnergy();
 
     rainTimer -= dt;
@@ -932,5 +841,9 @@ Wallpaper.scene("koi", (api) => {
 
   setSky(currentHour(performance.now()));
 
-  return { resize, paintBackdrop, step, draw, pointerMove, click, arrive, populate, population: KOI_COUNT };
+  return {
+    resize, paintBackdrop, step, draw, pointerMove, click, populate,
+    arrive: cross.arrive,
+    population: () => ({ koi: KOI_COUNT }),
+  };
 });
