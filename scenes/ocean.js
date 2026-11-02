@@ -48,15 +48,15 @@ Wallpaper.scene("ocean", (api) => {
    * sky (side view), light on the animals].
    */
   const SKY = [
-    [0, [8, 34, 56], [1, 8, 18], [30, 90, 110], [80, 240, 210], [6, 10, 24], 0.9],
-    [5, [8, 34, 56], [1, 8, 18], [30, 90, 110], [80, 240, 210], [6, 10, 24], 0.9],
+    [0, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], [6, 10, 24], 1],
+    [5, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], [6, 10, 24], 1],
     [6.5, [70, 84, 130], [14, 24, 56], [190, 150, 190], [200, 220, 255], [230, 150, 140], 0.8],
     [8, [76, 186, 200], [14, 92, 132], [210, 250, 245], [235, 255, 255], [176, 216, 236], 1],
     [16, [76, 186, 200], [14, 92, 132], [210, 250, 245], [235, 255, 255], [176, 216, 236], 1],
     [18.3, [130, 120, 140], [20, 46, 84], [255, 200, 160], [255, 230, 200], [246, 160, 110], 0.85],
     [20, [16, 46, 80], [3, 12, 28], [60, 110, 150], [120, 230, 230], [20, 22, 48], 0.9],
-    [21.5, [8, 34, 56], [1, 8, 18], [30, 90, 110], [80, 240, 210], [6, 10, 24], 0.9],
-    [24, [8, 34, 56], [1, 8, 18], [30, 90, 110], [80, 240, 210], [6, 10, 24], 0.9],
+    [21.5, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], [6, 10, 24], 1],
+    [24, [20, 58, 82], [6, 22, 40], [58, 126, 148], [100, 250, 224], [6, 10, 24], 1],
   ];
   const sky = { hour: -1, shallow: [0, 0, 0], deep: [0, 0, 0], dot: [0, 0, 0], glow: [0, 0, 0], air: [0, 0, 0], light: 1, day: 1 };
   const startTime = performance.now();
@@ -176,7 +176,7 @@ Wallpaper.scene("ocean", (api) => {
     // Sun or moon glow through the surface.
     const sx = w * (0.15 + 0.7 * clamp((sky.hour - 6) / 12, 0, 1)), sr = h * 0.45;
     const glow = g.createRadialGradient(sx, surfaceY, 0, sx, surfaceY, sr);
-    glow.addColorStop(0, `rgba(255,250,230,${0.18 + 0.12 * sky.day})`);
+    glow.addColorStop(0, `rgba(210,232,255,${0.25 + 0.12 * sky.day})`);
     glow.addColorStop(1, "rgba(255,250,230,0)");
     g.fillStyle = glow;
     g.fillRect(sx - sr, 0, sr * 2, sr * 2);
@@ -564,7 +564,7 @@ Wallpaper.scene("ocean", (api) => {
   function shade(base, light, d, y, out) {
     const k = (0.45 + 0.7 * light) * sky.light;
     // Moonlight: at night dark skin is lifted toward a cool blue so black backs still read.
-    const moon = (1 - sky.day) * 55;
+    const moon = (1 - sky.day) * 76;
     const f = fogAt(d), w = waterAt(y);
     out[0] = lerp((base[0] + moon * 0.6) * k, w[0], f);
     out[1] = lerp((base[1] + moon * 0.8) * k, w[1], f);
@@ -980,7 +980,7 @@ Wallpaper.scene("ocean", (api) => {
   }
 
   function drawFish() {
-    const base = mix([170, 186, 200], [230, 236, 240], sky.day);
+    const base = mix([222, 238, 246], [230, 236, 240], sky.day);
     for (const f of fish) {
       const g = Math.abs(f.vx) > Math.abs(f.vy) * 0.6 ? (f.vx > 0 ? ">" : "<") : f.vy > 0 ? "v" : "^";
       const c = mix(mix(base, waterAt(f.y), 0.25), [255, 255, 255], f.glint);

@@ -153,6 +153,7 @@
         const n = Math.max(1, Math.ceil(dt / 0.05 - 1e-6));
         for (let k = 0; k < n; k++) scene.step(dt / n, t);
       }
+      if (scene.refreshBackdrop && scene.refreshBackdrop()) grid.repaintBackdrop();
       grid.clear();
       scene.draw(t, dt);
       grid.flush();

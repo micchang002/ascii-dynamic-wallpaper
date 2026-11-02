@@ -21,20 +21,33 @@
  * hopping at it on the wall); rest it on a duck to pet it; click a duck to boop it; click
  * anywhere else to drop a toy (ball, sock, block, rubber duck).
  *
- * URL params: ducks=4 (1–8), pose=all (a still line-up: every colourway from several angles,
- * standing, sitting and with the bill open).
+ * URL params: ducks=4 (1–8), hour=13.5, cycle=120, pose=all (a still line-up: every
+ * colourway from several angles, standing, sitting and with the bill open).
  */
 Wallpaper.scene("microduck", (api) => {
   "use strict";
 
-  const { grid, params, intParam, pointer, setTheme } = api;
-  const { clamp, lerp, wrapAngle, rand, hash2 } = Wallpaper.math;
+  const { grid, params, intParam, floatParam, pointer, setTheme } = api;
+  const { clamp, lerp, smoothstep, wrapAngle, rand, hash2 } = Wallpaper.math;
   const style = Wallpaper.style;
   const shapes = Wallpaper.shapes;
   const PI = Math.PI;
 
   const GALLERY = params.get("pose") === "all";
   const COUNT = GALLERY ? 8 : clamp(intParam("ducks", 4), 1, 8);
+  const PIN_HOUR = floatParam("hour", NaN);
+  const CYCLE = floatParam("cycle", 0);
+  const startTime = performance.now();
+  let daylight = 0;
+  let paintedDaylight = -1;
+
+  function updateDaylight(now = performance.now()) {
+    const d = new Date();
+    const clock = Number.isFinite(PIN_HOUR) ? PIN_HOUR : d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600;
+    const hour = CYCLE > 0 ? (clock + ((now - startTime) / 1000 / CYCLE) * 24) % 24 : clock;
+    daylight = smoothstep(5.5, 8, hour) * (1 - smoothstep(17.5, 20.5, hour));
+  }
+  const mixColor = (night, day, amount) => `rgb(${night.map((v, i) => Math.round(lerp(v, day[i], amount))).join(",")})`;
 
   /** The four colourways, as on the real robots: shell, bill, eye ring, foot block and sole. */
   const LOOKS = [
@@ -132,31 +145,42 @@ Wallpaper.scene("microduck", (api) => {
   }
 
   function paintBackdrop(g, w, h) {
+    updateDaylight();
+    paintedDaylight = daylight;
     const wall = g.createLinearGradient(0, 0, 0, floorTop);
-    wall.addColorStop(0, "#151827");
-    wall.addColorStop(1, "#262a42");
+    wall.addColorStop(0, mixColor([34, 43, 64], [112, 164, 198], daylight));
+    wall.addColorStop(1, mixColor([58, 66, 94], [224, 202, 166], daylight));
     g.fillStyle = wall;
     g.fillRect(0, 0, w, floorTop);
 
     // A lamp somewhere off to the right warms the wall.
     const lamp = g.createRadialGradient(w * 0.8, floorTop * 0.6, 0, w * 0.8, floorTop * 0.6, w * 0.45);
-    lamp.addColorStop(0, "rgba(255,190,120,0.13)");
+    lamp.addColorStop(0, `rgba(255,190,120,${lerp(0.18, 0.04, daylight)})`);
     lamp.addColorStop(1, "rgba(255,190,120,0)");
     g.fillStyle = lamp;
     g.fillRect(0, 0, w, h);
 
-    // The window: night sky and a moon.
+    // The window shifts from a starry night to a bright daytime sky.
     const sky = g.createLinearGradient(0, win.y0, 0, win.y1);
-    sky.addColorStop(0, "#070b1c");
-    sky.addColorStop(1, "#1c2a4c");
+    sky.addColorStop(0, mixColor([18, 30, 54], [92, 174, 226], daylight));
+    sky.addColorStop(1, mixColor([42, 64, 98], [238, 211, 160], daylight));
     g.fillStyle = sky;
     g.fillRect(win.x0, win.y0, win.x1 - win.x0, win.y1 - win.y0);
     const mx = lerp(win.x0, win.x1, 0.75), my = lerp(win.y0, win.y1, 0.3), mr = (win.y1 - win.y0) * 0.1;
-    g.fillStyle = "#e8ecf6";
+    g.fillStyle = mixColor([232, 236, 246], [255, 220, 112], daylight);
     g.beginPath();
     g.arc(mx, my, mr, 0, PI * 2);
     g.fill();
-    g.strokeStyle = "#3a3550";
+    if (daylight < 0.8) {
+      g.globalAlpha = 1 - daylight;
+      for (const s of stars) {
+        const x = (s.c + 0.5) * cw, y = (s.r + 0.5) * ch;
+        g.fillStyle = "rgba(245,248,255,0.8)";
+        g.fillRect(x, y, Math.max(1, cw * 0.12), Math.max(1, ch * 0.12));
+      }
+      g.globalAlpha = 1;
+    }
+    g.strokeStyle = mixColor([58, 53, 80], [112, 132, 148], daylight);
     g.lineWidth = Math.max(4, cw * 0.8);
     g.strokeRect(win.x0, win.y0, win.x1 - win.x0, win.y1 - win.y0);
     g.lineWidth = Math.max(2, cw * 0.4);
@@ -187,11 +211,11 @@ Wallpaper.scene("microduck", (api) => {
     }
 
     // Skirting board and a wooden floor in perspective.
-    g.fillStyle = "#383450";
+    g.fillStyle = mixColor([56, 52, 80], [146, 126, 104], daylight);
     g.fillRect(0, floorTop - ch * 0.6, w, ch * 0.6);
     const floor = g.createLinearGradient(0, floorTop, 0, h);
-    floor.addColorStop(0, "#2a2226");
-    floor.addColorStop(1, "#3e3029");
+    floor.addColorStop(0, mixColor([56, 43, 50], [138, 104, 72], daylight));
+    floor.addColorStop(1, mixColor([82, 62, 52], [194, 151, 103], daylight));
     g.fillStyle = floor;
     g.fillRect(0, floorTop, w, h - floorTop);
     g.strokeStyle = "rgba(0,0,0,0.28)";
@@ -212,6 +236,11 @@ Wallpaper.scene("microduck", (api) => {
       g.lineTo(w, y);
       g.stroke();
     }
+  }
+
+  function refreshBackdrop() {
+    updateDaylight();
+    return Math.abs(daylight - paintedDaylight) >= 0.005;
   }
 
   // ------------------------------------------------------------- things
@@ -1211,7 +1240,7 @@ Wallpaper.scene("microduck", (api) => {
   }
 
   function draw(t) {
-    for (const s of stars) put(s.c, s.r, s.g, style(220, 225, 255, 0.4 + 0.35 * Math.sin(t * 1.3 + s.ph)));
+    for (const s of stars) put(s.c, s.r, s.g, style(220, 225, 255, (0.4 + 0.35 * Math.sin(t * 1.3 + s.ph)) * (1 - daylight)));
     for (const [c, r, g, st] of rug) put(c, r, g, st);
     drawRaceLines(t);
 
@@ -1260,5 +1289,5 @@ Wallpaper.scene("microduck", (api) => {
   /** Finer cells than most scenes, so a duck gets enough rows for its face. */
   const cellWidth = (w) => clamp(Math.round(w / 250), 6, 10);
 
-  return { cellWidth, resize, paintBackdrop, step, draw, click, chat: false };
+  return { cellWidth, resize, paintBackdrop, refreshBackdrop, step, draw, click, chat: false };
 });

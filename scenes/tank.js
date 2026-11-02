@@ -39,12 +39,12 @@ Wallpaper.scene("tank", (api) => {
 
   /** The tank through the day: [hour, water top, water bottom, light (0 = lamp off)]. */
   const SKY = [
-    [0, [12, 26, 48], [4, 10, 22], 0],
-    [6.5, [12, 26, 48], [4, 10, 22], 0],
+    [0, [22, 44, 68], [8, 22, 40], 0],
+    [6.5, [22, 44, 68], [8, 22, 40], 0],
     [7.5, [110, 176, 160], [36, 92, 96], 1],
     [21.5, [110, 176, 160], [36, 92, 96], 1],
-    [22.5, [12, 26, 48], [4, 10, 22], 0],
-    [24, [12, 26, 48], [4, 10, 22], 0],
+    [22.5, [22, 44, 68], [8, 22, 40], 0],
+    [24, [22, 44, 68], [8, 22, 40], 0],
   ];
   const sky = { hour: -1, top: [0, 0, 0], bottom: [0, 0, 0], lamp: 1 };
   const startTime = performance.now();
@@ -121,8 +121,8 @@ Wallpaper.scene("tank", (api) => {
     g.fillRect(0, gravelY, w, h - gravelY);
     // The lamp (or the night light) shining down from above the middle of the tank.
     const glow = g.createRadialGradient(w * 0.5, surfaceY, 0, w * 0.5, surfaceY, h * 0.8);
-    const lamp = sky.lamp > 0.5 ? "255,250,220" : "120,150,255";
-    glow.addColorStop(0, `rgba(${lamp},${0.16 + 0.1 * sky.lamp})`);
+    const lamp = sky.lamp > 0.5 ? "255,250,220" : "150,190,255";
+    glow.addColorStop(0, `rgba(${lamp},${0.19 + 0.1 * sky.lamp})`);
     glow.addColorStop(1, `rgba(${lamp},0)`);
     g.fillStyle = glow;
     g.fillRect(0, 0, w, h);
@@ -402,14 +402,16 @@ Wallpaper.scene("tank", (api) => {
   const tmp = [0, 0, 0];
 
   function shade(base, light, d, y, out) {
-    const lamp = lerp(0.55, 1, sky.lamp);
-    const k = (0.4 + 0.75 * light) * lamp;
+    const night = 1 - sky.lamp;
+    const lamp = lerp(0.72, 1, sky.lamp);
+    // A cool rim fill keeps dark varieties legible against the water at night.
+    const k = (0.48 + 0.78 * light) * lamp;
     const f = fogAt(d), w = waterAt(y);
-    // The night light washes everything a little blue.
-    const blue = (1 - sky.lamp) * 0.3;
-    out[0] = lerp(lerp(base[0] * k, 60, blue), w[0], f);
-    out[1] = lerp(lerp(base[1] * k, 80, blue), w[1], f);
-    out[2] = lerp(lerp(base[2] * k, 140, blue), w[2], f);
+    const blue = night * 0.22;
+    const rim = night * (0.12 + 0.28 * light);
+    out[0] = lerp(lerp(base[0] * k, 76, blue) + 42 * rim, w[0], f);
+    out[1] = lerp(lerp(base[1] * k, 112, blue) + 64 * rim, w[1], f);
+    out[2] = lerp(lerp(base[2] * k, 178, blue) + 82 * rim, w[2], f);
     return out;
   }
 
