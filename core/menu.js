@@ -21,6 +21,7 @@
     { name: "fireflies", label: "Fireflies" },
     { name: "microduck", label: "Microducks" },
     { name: "delta", label: "DRIC robotics lab" },
+    { name: "plants", label: "Staghorn fern" },
   ];
 
   const params = new URLSearchParams(location.search);
