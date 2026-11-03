@@ -33,6 +33,7 @@
   }
 
   const FROST_MARGIN = 24;
+  const SPRITE_LIMIT = 6000;
 
   class Grid {
     constructor(canvas) {
@@ -134,11 +135,17 @@
 
     // ------------------------------------------------------------ painting
 
+    /** Least recently used sprites are dropped first (a Map keeps insertion order). */
     sprite(st, g, bg) {
       const key = bg + "|" + st + g;
-      let img = this.sprites.get(key);
-      if (img) return img;
-      if (this.sprites.size > 6000) this.sprites.clear();
+      const { sprites } = this;
+      let img = sprites.get(key);
+      if (img) {
+        sprites.delete(key);
+        sprites.set(key, img);
+        return img;
+      }
+      if (sprites.size >= SPRITE_LIMIT) sprites.delete(sprites.keys().next().value);
       img = document.createElement("canvas");
       img.width = Math.ceil(this.cw * this.dpr);
       img.height = Math.ceil(this.ch * this.dpr);
@@ -158,7 +165,8 @@
 
     flush() {
       const { ctx, cols, rows, cw, ch, dpr, glyph, color, bg, shownGlyph, shownColor, shownBg, backdrop } = this;
-      if (this.glass) this.dirtyUnderGlass();
+      const frosting = this.glass && this.glassChanged();
+      if (frosting) this.dirtyUnderGlass();
       for (let r = 0; r < rows; r++) {
         const y = Math.round(r * ch * dpr), h = Math.round((r + 1) * ch * dpr) - y;
         for (let c = 0; c < cols; c++) {
@@ -173,7 +181,7 @@
           if (g || b) ctx.drawImage(this.sprite(color[i], g, b), x, y);
         }
       }
-      if (this.glass) this.frost();
+      if (frosting) this.frost();
     }
 
     // ------------------------------------------------------- frosted glass
@@ -195,11 +203,35 @@
       this.frostB.height = Math.max(1, Math.round(sh / 6));
     }
 
-    /** Cells under the panel are repainted sharp every frame, then frosted over. */
+    /** Cells c0..c1, r0..r1 under the panel, widened by `margin` px. */
+    glassCells(margin) {
+      const { glass, cw, ch, cols, rows } = this;
+      return [
+        Math.max(0, Math.floor((glass.x - margin) / cw)), Math.min(cols - 1, Math.floor((glass.x + glass.w + margin) / cw)),
+        Math.max(0, Math.floor((glass.y - margin) / ch)), Math.min(rows - 1, Math.floor((glass.y + glass.h + margin) / ch)),
+      ];
+    }
+
+    /**
+     * Whether any cell the blur samples (the panel plus its margin) changed this frame. If
+     * none did, last frame's frosted pixels are still right and the panel is left alone.
+     */
+    glassChanged() {
+      const { cols, glyph, color, bg, shownGlyph, shownColor, shownBg } = this;
+      const [c0, c1, r0, r1] = this.glassCells(FROST_MARGIN);
+      for (let r = r0; r <= r1; r++) {
+        for (let i = r * cols + c0, end = r * cols + c1; i <= end; i++) {
+          const g = glyph[i];
+          if (g !== shownGlyph[i] || bg[i] !== shownBg[i] || (g && color[i] !== shownColor[i])) return true;
+        }
+      }
+      return false;
+    }
+
+    /** Cells under the panel are repainted sharp, then frosted over. */
     dirtyUnderGlass() {
-      const { glass, cw, ch, cols, rows, shownGlyph } = this;
-      const c0 = Math.max(0, Math.floor(glass.x / cw)), c1 = Math.min(cols - 1, Math.floor((glass.x + glass.w) / cw));
-      const r0 = Math.max(0, Math.floor(glass.y / ch)), r1 = Math.min(rows - 1, Math.floor((glass.y + glass.h) / ch));
+      const { cols, shownGlyph } = this;
+      const [c0, c1, r0, r1] = this.glassCells(0);
       for (let r = r0; r <= r1; r++) {
         for (let c = c0; c <= c1; c++) shownGlyph[r * cols + c] = null;
       }

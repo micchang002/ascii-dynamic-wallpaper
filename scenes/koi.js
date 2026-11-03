@@ -11,11 +11,18 @@
  *
  * URL params: koi=7, pads=5, hour=13.5 (pin the time of day), cycle=120 (a whole day in
  * this many seconds). Click to drop food; koi drift towards a resting cursor.
+ *
+ * Across monitors: with ?pxmm= the koi, pads and ripples keep the same size on every monitor,
+ * and a koi that swims into a door (see core/app.js) carries on in the neighbour's pond. While
+ * it crosses, both halves swim straight on, so the part still here lines up with the part there.
+ * The host keeps count across linked monitors: koi leave only from the fuller pond of the two,
+ * one at a time is sent towards a door when this pond is over its share, and when the group is
+ * short or over, a koi rises from the deep or sinks out of sight.
  */
 Wallpaper.scene("koi", (api) => {
   "use strict";
 
-  const { grid, intParam, floatParam, pointer, setTheme } = api;
+  const { grid, intParam, floatParam, pointer, setTheme, pxmm } = api;
   const { clamp, lerp, smoothstep, wrapAngle, rand, noise2 } = Wallpaper.math;
   const style = Wallpaper.style;
 
@@ -32,6 +39,11 @@ Wallpaper.scene("koi", (api) => {
   const GOLD = [240, 188, 68];
   const SLATE = [112, 146, 178];
   const PELLET = [196, 150, 96];
+
+  // With the monitor's size known, lengths are set in mm; U scales the rest of the px
+  // constants from the monitor they were tuned on (24" 1080p, 3.6 px/mm).
+  const U = pxmm ? pxmm / 3.6 : 1;
+  const KOI_MM = 90, PAD_MM = 19;
 
   /**
    * The pond through the day, interpolated by local hour:
@@ -152,7 +164,7 @@ Wallpaper.scene("koi", (api) => {
   const VARIETIES = ["kohaku", "sanke", "showa", "ogon", "tancho", "asagi", "butterfly"];
   const NODES = 14;
 
-  const koiLength = (scale) => clamp(Math.min(W, H) * 0.3, 150, 440) * scale;
+  const koiLength = (scale) => (pxmm ? KOI_MM * pxmm : clamp(Math.min(W, H) * 0.3, 150, 440)) * scale;
 
   /** Top-down half-width at s ∈ [0, 1] (nose → tail root), as a fraction of body length. */
   function halfWidth(s) {
@@ -163,9 +175,8 @@ Wallpaper.scene("koi", (api) => {
 
   const koi = [];
 
-  function spawnKoi(variety) {
-    const scale = rand(0.7, 1.15);
-    const k = {
+  function makeKoi(variety, scale) {
+    return {
       variety,
       scale,
       L: koiLength(scale),
@@ -181,7 +192,20 @@ Wallpaper.scene("koi", (api) => {
       finScale: variety === "butterfly" ? 1.7 : 1,
       px: new Float32Array(NODES),
       py: new Float32Array(NODES),
+      // Set by core/crossing.js while it swims between monitors.
+      crossing: null,
+      // 0..1; fade +1 while rising into view, -1 while sinking out (then gone).
+      alpha: 1,
+      fade: 0,
     };
+  }
+
+  function spawnKoi(variety, rising) {
+    const k = makeKoi(variety, rand(0.7, 1.15));
+    if (rising) {
+      k.alpha = 0;
+      k.fade = 1;
+    }
     const x = rand(W * 0.15, W * 0.85), y = rand(H * 0.15, H * 0.85);
     const seg = k.L / (NODES - 1);
     for (let i = 0; i < NODES; i++) {
@@ -192,18 +216,89 @@ Wallpaper.scene("koi", (api) => {
     koi.push(k);
   }
 
+  // Doors to the next monitors (core/crossing.js); the spine goes over relative to the head, in body lengths.
+  const KEPT = ["variety", "scale", "seed", "depth", "angle", "cruise", "wander", "phase", "finScale"];
+  const cross = Wallpaper.crossing(api, {
+    animals: () => koi,
+    kindOf: () => "koi",
+    counted: (k) => k.fade >= 0,
+    settled: (k) => !k.fade,
+    head: (k) => [k.px[0], k.py[0]],
+    dir: (k) => [Math.cos(k.angle), Math.sin(k.angle)],
+    outline: (k) => Array.from({ length: NODES }, (_, i) => [k.px[i], k.py[i]]),
+    reach: (k) => k.L * 0.3 * k.finScale,
+    pack(k) {
+      const data = { speed: k.speed / k.L, spine: [] };
+      for (const key of KEPT) data[key] = k[key];
+      for (let i = 0; i < NODES; i++) data.spine.push((k.px[i] - k.px[0]) / k.L, (k.py[i] - k.py[0]) / k.L);
+      return data;
+    },
+    unpack(data, side, x, y, mirrored) {
+      if (!VARIETIES.includes(data.variety) || !Array.isArray(data.spine) || data.spine.length !== NODES * 2) return null;
+      const k = makeKoi(data.variety, clamp(+data.scale || 1, 0.5, 1.5));
+      for (const key of KEPT) if (key !== "variety" && key !== "scale" && Number.isFinite(data[key])) k[key] = data[key];
+      k.L = koiLength(k.scale);
+      k.speed = clamp(+data.speed || k.cruise, 0.1, 1) * k.L;
+      // Sent back: flip it in the edge, so it heads back into the pond.
+      const flipX = mirrored && (side === "l" || side === "r"), flipY = mirrored && !flipX;
+      for (let i = 0; i < NODES; i++) {
+        k.px[i] = x + data.spine[i * 2] * k.L * (flipX ? -1 : 1);
+        k.py[i] = y + data.spine[i * 2 + 1] * k.L * (flipY ? -1 : 1);
+      }
+      if (flipX) k.angle = wrapAngle(Math.PI - k.angle);
+      if (flipY) k.angle = -k.angle;
+      koi.push(k);
+      return k;
+    },
+  });
+
   function stepKoi(k, dt) {
+    if (!k.crossing) steerKoi(k, dt);
+    swimKoi(k, dt);
+    if (k.fade) {
+      k.alpha = clamp(k.alpha + (k.fade * dt) / FADE_S, 0, 1);
+      if (k.alpha === 1) k.fade = 0;
+      else if (k.alpha === 0) k.gone = true;
+    }
+  }
+
+  const FADE_S = 3;
+
+  /** The host's count is off: n koi rise from the deep (or -n sink out of sight). */
+  function populate(n) {
+    for (let i = 0; i < n; i++) spawnKoi(VARIETIES[(Math.random() * VARIETIES.length) | 0], true);
+    const going = koi.filter((k) => !k.fade && !k.crossing);
+    for (let i = 0; i < -n && going.length; i++) {
+      // Not the one on its way to a door, if there is another.
+      const pick = going.length > 1 ? going.filter((k) => !cross.pull(k)) : going;
+      const k = pick[(Math.random() * pick.length) | 0];
+      k.fade = -1;
+      going.splice(going.indexOf(k), 1);
+    }
+    cross.end();
+  }
+
+  function steerKoi(k, dt) {
     const L = k.L;
     const hx = k.px[0], hy = k.py[0];
     let fx = Math.cos(k.angle), fy = Math.sin(k.angle);
     let urgency = 0;
 
-    // Soft walls: turn back well before the edge.
-    const m = L * 0.9;
-    if (hx < m) fx += ((m - hx) / m) * 2.5;
-    if (hx > W - m) fx -= ((hx - (W - m)) / m) * 2.5;
-    if (hy < m) fy += ((m - hy) / m) * 2.5;
-    if (hy > H - m) fy -= ((hy - (H - m)) / m) * 2.5;
+    // Soft walls: turn back well before the edge, unless it is a door wide enough for the body
+    // (a koi rising or sinking isn't settled, so doors are walls to it).
+    const m = L * 0.9, wide = L * 0.15;
+    const open = (side, along) => cross.edge(k, side, along, wide) === "open";
+    if (hx < m && !open("l", hy)) fx += ((m - hx) / m) * 2.5;
+    if (hx > W - m && !open("r", hy)) fx -= ((hx - (W - m)) / m) * 2.5;
+    if (hy < m && !open("t", hx)) fy += ((m - hy) / m) * 2.5;
+    if (hy > H - m && !open("b", hx)) fy -= ((hy - (H - m)) / m) * 2.5;
+
+    const sent = cross.pull(k);
+    if (sent) {
+      const d = Math.hypot(sent[0] - hx, sent[1] - hy) || 1;
+      fx += ((sent[0] - hx) / d) * 1.6;
+      fy += ((sent[1] - hy) / d) * 1.6;
+    }
 
     // Keep a little personal space (head vs. the other fish's middle).
     for (const o of koi) {
@@ -261,6 +356,18 @@ Wallpaper.scene("koi", (api) => {
 
     const target = L * (k.cruise + urgency * 0.35);
     k.speed += (target - k.speed) * Math.min(1, dt * 1.2);
+  }
+
+  /** Swim on along the heading; crossing a door hands the koi to the neighbour. */
+  function swimKoi(k, dt) {
+    const L = k.L;
+    // Mid-crossing, both halves turn alike towards straight across, so a koi that came in
+    // along the edge doesn't glide down it for minutes.
+    const across = cross.heading(k);
+    if (across) {
+      const a = Math.atan2(across[1], across[0]);
+      k.angle = wrapAngle(k.angle + clamp(wrapAngle(a - k.angle), -0.6 * dt, 0.6 * dt));
+    }
     k.phase += dt * (2.2 + (k.speed / L) * 9);
 
     // Head leads; every node follows at a fixed spacing.
@@ -276,6 +383,8 @@ Wallpaper.scene("koi", (api) => {
 
     addEnergy(k.px[1], k.py[1], 0.05 + (k.speed / L) * 0.12);
     addEnergy(k.px[NODES - 1], k.py[NODES - 1], 0.08);
+
+    if (cross.update(k, dt)) k.gone = true;
   }
 
   // Scratch spine for the koi being drawn (with the swimming wave applied).
@@ -438,7 +547,8 @@ Wallpaper.scene("koi", (api) => {
     const c0 = Math.max(0, Math.floor((minX - pad) / cw)), c1 = Math.min(cols - 1, Math.floor((maxX + pad) / cw));
     const r0 = Math.max(0, Math.floor((minY - pad) / ch)), r1 = Math.min(rows - 1, Math.floor((maxY + pad) / ch));
     // Deeper koi fade into a dark pond; by day they stay solid so they don't wash out.
-    const depthAlpha = lerp(0.55 + 0.45 * k.depth, 1, clamp(sky.shadow / 0.35, 0, 1));
+    const depthAlpha = lerp(0.55 + 0.45 * k.depth, 1, clamp(sky.shadow / 0.35, 0, 1)) * k.alpha;
+    if (depthAlpha < 0.02) return;
     // Beyond these distances from the spine nothing can be hit: skip the supersampling.
     const diag = Math.hypot(cw, ch) * 0.5;
     const bodyReach = L * (0.14 + 0.13 * k.finScale) + diag;
@@ -491,7 +601,7 @@ Wallpaper.scene("koi", (api) => {
 
   /** A soft blob under each koi, offset away from the sun; only visible by day. */
   function drawShadow(k) {
-    const strength = sky.shadow * (0.6 + 0.4 * k.depth);
+    const strength = sky.shadow * (0.6 + 0.4 * k.depth) * k.alpha;
     if (strength < 0.03) return;
     const L = k.L, ox = L * 0.07, oy = L * 0.1;
     const st = style(sky.edge[0] * 0.5, sky.edge[1] * 0.5, sky.edge[2] * 0.5, strength);
@@ -514,13 +624,13 @@ Wallpaper.scene("koi", (api) => {
   const pads = [];
 
   function addRipple(x, y, strength, maxR) {
-    ripples.push({ x, y, r: 0, strength, maxR: maxR || rand(120, 220) });
+    ripples.push({ x, y, r: 0, strength, maxR: maxR || rand(120, 220) * U });
   }
 
   function drawRipples(dt) {
     for (let i = ripples.length - 1; i >= 0; i--) {
       const rp = ripples[i];
-      rp.r += dt * 70;
+      rp.r += dt * 70 * U;
       if (rp.r > rp.maxR) {
         ripples.splice(i, 1);
         continue;
@@ -550,24 +660,24 @@ Wallpaper.scene("koi", (api) => {
         food.splice(i, 1);
         continue;
       }
-      p.x += Math.sin(t * 0.7 + p.seed) * dt * 4;
-      p.y += Math.cos(t * 0.6 + p.seed) * dt * 4;
+      p.x += Math.sin(t * 0.7 + p.seed) * dt * 4 * U;
+      p.y += Math.cos(t * 0.6 + p.seed) * dt * 4 * U;
       put(Math.floor(p.x / cw), Math.floor(p.y / ch), "o", st);
     }
   }
 
   function spawnPads() {
     pads.length = 0;
-    const base = clamp(Math.min(W, H) * 0.065, 36, 100);
+    const base = pxmm ? PAD_MM * pxmm : clamp(Math.min(W, H) * 0.065, 36, 100);
     for (let tries = 0; pads.length < PAD_COUNT && tries < 400; tries++) {
       const R = base * rand(0.6, 1.3);
       const x = rand(R, W - R), y = rand(R, H - R);
-      if (pads.some((p) => Math.hypot(p.x - x, p.y - y) < p.R + R + 30)) continue;
+      if (pads.some((p) => Math.hypot(p.x - x, p.y - y) < p.R + R + 30 * U)) continue;
       pads.push({
         x, y, R,
         rot: rand(0, Math.PI * 2),
         spin: rand(-0.02, 0.02),
-        vx: rand(-3, 3), vy: rand(-2, 2),
+        vx: rand(-3, 3) * U, vy: rand(-2, 2) * U,
         flower: Math.random() < 0.45,
         seed: rand(0, 100),
       });
@@ -641,7 +751,7 @@ Wallpaper.scene("koi", (api) => {
   /** Caustics drift slowly, so each frame refreshes only every third row. */
   function drawFloor(t) {
     for (let r = frameNo % 3; r < rows; r += 3) {
-      const y = (r + 0.5) * ch;
+      const y = ((r + 0.5) * ch) / U;
       for (let c = 0; c < cols; c++) {
         const i = r * cols + c;
         const e = energy[i];
@@ -651,7 +761,7 @@ Wallpaper.scene("koi", (api) => {
           if (e < 0.06) continue;
           g = e > 0.3 ? "~" : ".";
         }
-        const x = (c + 0.5) * cw;
+        const x = ((c + 0.5) * cw) / U;
         const caustic = Math.max(0,
           Math.sin(x * 0.011 + t * 0.5 + Math.sin(y * 0.013 - t * 0.35) * 2) *
           Math.sin(y * 0.015 - t * 0.45 + Math.sin(x * 0.008 + t * 0.3) * 2));
@@ -677,13 +787,16 @@ Wallpaper.scene("koi", (api) => {
       skyPainted = now;
     }
 
+    cross.begin();
     for (const k of koi) stepKoi(k, dt);
+    for (let i = koi.length - 1; i >= 0; i--) if (koi[i].gone) koi.splice(i, 1);
+    cross.end();
     diffuseEnergy();
 
     rainTimer -= dt;
     if (rainTimer <= 0) {
       const x = rand(0, W), y = rand(0, H);
-      addRipple(x, y, 0.45, rand(60, 140));
+      addRipple(x, y, 0.45, rand(60, 140) * U);
       addEnergy(x, y, 0.6);
       rainTimer = rand(2, 7);
     }
@@ -719,14 +832,18 @@ Wallpaper.scene("koi", (api) => {
   }
 
   function click(x, y) {
-    addRipple(x, y, 1, 200);
+    addRipple(x, y, 1, 200 * U);
     addEnergy(x, y, 1.2);
     for (let i = 0; i < 5; i++) {
-      food.push({ x: x + rand(-24, 24), y: y + rand(-16, 16), life: 30, seed: rand(0, 100) });
+      food.push({ x: x + rand(-24, 24) * U, y: y + rand(-16, 16) * U, life: 30, seed: rand(0, 100) });
     }
   }
 
   setSky(currentHour(performance.now()));
 
-  return { resize, paintBackdrop, step, draw, pointerMove, click };
+  return {
+    resize, paintBackdrop, step, draw, pointerMove, click, populate,
+    arrive: cross.arrive,
+    population: () => ({ koi: KOI_COUNT }),
+  };
 });
