@@ -13,6 +13,7 @@ Inspired by [stackedlol/ascii-sharks](https://github.com/stackedlol/ascii-sharks
 | `tank` | A goldfish aquarium: ryukin, oranda, black telescope-eye, ranchu, comet and shubunkin with flowing see-through tails. Click to sprinkle flakes; rest the cursor on the glass and the fish come to look at you. The lamp turns off at night. |
 | `fireflies` | Fireflies over a meadow and a moonlit pond. They start out blinking at random and, over a minute, fall into step until the whole field flashes together (`?sync=60` sets how long). Click to flash a lantern and they answer in a spreading ring. |
 | `microduck` | Little two-legged robot ducks (after Pollen Robotics' Microduck: loaf-shaped head with one camera eye, a flat bill that drops open, black servo neck and legs, chunky two-tone feet) in a playroom, in cream, sky, lavender and graphite. They waddle about, look at you, sit and doze, dance, chat in their own voices, roller-skate (and wipe out, then get back up), carry toys to the basket in their beaks, kick a ball around, recharge at the dock, and sometimes race. Move the cursor and they chase it like a laser dot; rest it on a duck to pet it; click a duck to boop it, anywhere else to drop a toy. `--ducks 4` or `?ducks=4`; open `?scene=microduck&pose=all` to see every colourway from several angles. |
+| `plants` | A staghorn fern on a curving tree branch. It sprouts at dawn, grows into a big plant through the day, wilts after sunset and drops its dead fronds before the next dawn, then starts again. Small birds hop around the branches and sleep there at night. Click to blow a gust of wind and scare off nearby birds. |
 
 ## Install (Linux)
 
@@ -37,7 +38,7 @@ You don't need any extra packages for the system monitor. It reads `/proc` and u
 
 ### Windows / macOS
 
-Open `index.html?scene=koi` or `index.html?scene=delta` in [Lively Wallpaper](https://www.rocksdanister.com/lively/) (Windows) or [Plash](https://sindresorhus.com/plash) (macOS).
+Open `index.html?scene=koi`, `index.html?scene=delta` or `index.html?scene=plants` in [Lively Wallpaper](https://www.rocksdanister.com/lively/) (Windows) or [Plash](https://sindresorhus.com/plash) (macOS).
 The system monitor only works with the Linux launcher.
 
 ## Options
@@ -94,7 +95,7 @@ Wallpaper.scene("name", ({ grid }) => ({
 }));
 ```
 
-`scenes/koi.js` and `scenes/delta.js` are full examples. The shared code is in `core/`:
+`scenes/koi.js`, `scenes/delta.js` and `scenes/plants.js` are full examples. The shared code is in `core/`:
 
 | File | What it does |
 |------|--------------|

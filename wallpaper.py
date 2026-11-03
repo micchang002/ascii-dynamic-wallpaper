@@ -14,6 +14,7 @@ prompt in Claude or ChatGPT in the default browser.
 
     ./wallpaper.py                     # the koi pond on every monitor
     ./wallpaper.py --scene delta       # the Delta Robotics Innovation Center
+    ./wallpaper.py --scene plants      # a staghorn fern that grows and wilts each day
     ./wallpaper.py --scene delta,koi   # one scene per monitor, in order
     ./wallpaper.py --koi 9 --fps 30    # tune the pond
     ./wallpaper.py --monitor 1         # one monitor only
@@ -72,7 +73,7 @@ SCENES = sorted(p.stem for p in (HERE / "scenes").glob("*.js"))
 # follow the same hours. Everything else is dark.
 CLOCK_THEMED = {"koi", "cats", "cat", "shore", "ocean"}
 # Scenes without a chat box (they return chat: false).
-NO_CHAT = {"delta", "cats", "ocean", "tank", "fireflies", "microduck"}
+NO_CHAT = {"delta", "cats", "ocean", "tank", "fireflies", "microduck", "plants"}
 # What the page's scene menu sets (core/menu.js); remembered per monitor.
 MENU_KEYS = {"scene", "view", "species", "env"}
 # A monitor this much covered by windows pauses its scene; this much slows it to SLOW_FPS.
